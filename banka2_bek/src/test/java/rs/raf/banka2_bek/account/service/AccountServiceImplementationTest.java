@@ -4,11 +4,18 @@ import rs.raf.banka2_bek.account.dto.AccountResponseDto;
 import rs.raf.banka2_bek.account.model.*;
 import rs.raf.banka2_bek.account.repository.AccountRepository;
 import rs.raf.banka2_bek.account.service.implementation.AccountServiceImplementation;
+import rs.raf.banka2_bek.auth.model.User;
+import rs.raf.banka2_bek.auth.repository.UserRepository;
+import rs.raf.banka2_bek.card.service.CardService;
 import rs.raf.banka2_bek.client.model.Client;
 import rs.raf.banka2_bek.client.repository.ClientRepository;
 import rs.raf.banka2_bek.company.model.Company;
+import rs.raf.banka2_bek.company.repository.CompanyRepository;
 import rs.raf.banka2_bek.currency.model.Currency;
+import rs.raf.banka2_bek.currency.repository.CurrencyRepository;
 import rs.raf.banka2_bek.employee.model.Employee;
+import rs.raf.banka2_bek.employee.repository.EmployeeRepository;
+import rs.raf.banka2_bek.account.dto.CreateAccountDto;
 
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
@@ -17,10 +24,12 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageImpl;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.context.SecurityContext;
 import org.springframework.security.core.context.SecurityContextHolder;
-import org.springframework.security.core.userdetails.User;
 import org.springframework.security.core.userdetails.UserDetails;
 
 import java.math.BigDecimal;
@@ -32,21 +41,24 @@ import java.util.Optional;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.*;
+import static org.mockito.Mockito.lenient;
 
 @ExtendWith(MockitoExtension.class)
 class AccountServiceImplementationTest {
 
-    @Mock
-    private AccountRepository accountRepository;
-
-    @Mock
-    private ClientRepository clientRepository;
+    @Mock private AccountRepository accountRepository;
+    @Mock private ClientRepository clientRepository;
+    @Mock private CurrencyRepository currencyRepository;
+    @Mock private CompanyRepository companyRepository;
+    @Mock private EmployeeRepository employeeRepository;
+    @Mock private UserRepository userRepository;
+    @Mock private CardService cardService;
 
     @InjectMocks
     private AccountServiceImplementation accountService;
 
     private void mockAuthenticatedUser(String email) {
-        UserDetails userDetails = User.builder()
+        UserDetails userDetails = org.springframework.security.core.userdetails.User.builder()
                 .username(email)
                 .password("password")
                 .authorities("ROLE_CLIENT")
@@ -581,6 +593,236 @@ class AccountServiceImplementationTest {
 
             assertThrows(IllegalStateException.class,
                     () -> accountService.updateAccountLimits(4L, new BigDecimal("300000"), null));
+        }
+    }
+
+    @Nested
+    @DisplayName("createAccount")
+    class CreateAccount {
+
+        @Test
+        @DisplayName("uspesno kreira tekuci RSD racun za klijenta")
+        void createCheckingRsd() {
+            mockAuthenticatedUser("admin@banka.rs");
+
+            Currency rsd = Currency.builder().id(8L).code("RSD").build();
+            Employee admin = Employee.builder().id(1L).firstName("Nikola").lastName("Milenković").active(true).build();
+            Client stefan = Client.builder().id(1L).firstName("Stefan").lastName("Jovanović").email("stefan@gmail.com").build();
+
+            CreateAccountDto dto = new CreateAccountDto();
+            dto.setAccountType(AccountType.CHECKING);
+            dto.setAccountSubtype(rs.raf.banka2_bek.account.model.AccountSubtype.STANDARD);
+            dto.setCurrency("RSD");
+            dto.setInitialDeposit(10000.0);
+            dto.setOwnerEmail("stefan@gmail.com");
+            dto.setCreateCard(false);
+
+            when(currencyRepository.findByCode("RSD")).thenReturn(Optional.of(rsd));
+            when(employeeRepository.findByEmail("admin@banka.rs")).thenReturn(Optional.of(admin));
+            when(clientRepository.findByEmail("stefan@gmail.com")).thenReturn(Optional.of(stefan));
+            when(accountRepository.existsByAccountNumber(any())).thenReturn(false);
+            when(accountRepository.save(any(Account.class))).thenAnswer(inv -> {
+                Account a = inv.getArgument(0);
+                a.setId(1L);
+                return a;
+            });
+
+            AccountResponseDto result = accountService.createAccount(dto);
+
+            assertNotNull(result);
+            assertEquals("RSD", result.getCurrencyCode());
+            verify(accountRepository).save(any(Account.class));
+        }
+
+        @Test
+        @DisplayName("baca gresku za nepostojecu valutu")
+        void invalidCurrency() {
+            // Koristimo lenient jer mockAuthenticatedUser pravi stubbinge koji se ne koriste
+            // posto createAccount baca izuzetak pre nego sto stigne do auth provere
+            Authentication authentication = mock(Authentication.class);
+            lenient().when(authentication.isAuthenticated()).thenReturn(true);
+            SecurityContext securityContext = mock(SecurityContext.class);
+            lenient().when(securityContext.getAuthentication()).thenReturn(authentication);
+            SecurityContextHolder.setContext(securityContext);
+
+            CreateAccountDto dto = new CreateAccountDto();
+            dto.setCurrency("XYZ");
+
+            when(currencyRepository.findByCode("XYZ")).thenReturn(Optional.empty());
+
+            assertThrows(RuntimeException.class, () -> accountService.createAccount(dto));
+        }
+
+        @Test
+        @DisplayName("baca gresku bez vlasnika za licni racun")
+        void noOwnerForPersonal() {
+            mockAuthenticatedUser("admin@banka.rs");
+
+            Currency rsd = Currency.builder().id(8L).code("RSD").build();
+            Employee admin = Employee.builder().id(1L).firstName("Admin").lastName("Admin").active(true).build();
+
+            CreateAccountDto dto = new CreateAccountDto();
+            dto.setAccountType(AccountType.CHECKING);
+            dto.setCurrency("RSD");
+
+            when(currencyRepository.findByCode("RSD")).thenReturn(Optional.of(rsd));
+            when(employeeRepository.findByEmail("admin@banka.rs")).thenReturn(Optional.of(admin));
+
+            assertThrows(RuntimeException.class, () -> accountService.createAccount(dto));
+        }
+
+        @Test
+        @DisplayName("kreira racun sa auto-karticom")
+        void createWithAutoCard() {
+            mockAuthenticatedUser("admin@banka.rs");
+
+            Currency rsd = Currency.builder().id(8L).code("RSD").build();
+            Employee admin = Employee.builder().id(1L).firstName("Nikola").lastName("M").active(true).build();
+            Client stefan = Client.builder().id(1L).firstName("Stefan").lastName("J").email("stefan@gmail.com").build();
+
+            CreateAccountDto dto = new CreateAccountDto();
+            dto.setAccountType(AccountType.CHECKING);
+            dto.setCurrency("RSD");
+            dto.setOwnerEmail("stefan@gmail.com");
+            dto.setCreateCard(true);
+
+            when(currencyRepository.findByCode("RSD")).thenReturn(Optional.of(rsd));
+            when(employeeRepository.findByEmail("admin@banka.rs")).thenReturn(Optional.of(admin));
+            when(clientRepository.findByEmail("stefan@gmail.com")).thenReturn(Optional.of(stefan));
+            when(accountRepository.existsByAccountNumber(any())).thenReturn(false);
+            when(accountRepository.save(any(Account.class))).thenAnswer(inv -> {
+                Account a = inv.getArgument(0);
+                a.setId(5L);
+                return a;
+            });
+
+            accountService.createAccount(dto);
+            verify(cardService).createCardForAccount(eq(5L), eq(1L), isNull());
+        }
+
+        @Test
+        @DisplayName("kreira poslovni racun sa firmom")
+        void createBusinessAccount() {
+            mockAuthenticatedUser("admin@banka.rs");
+
+            Currency rsd = Currency.builder().id(8L).code("RSD").build();
+            Employee admin = Employee.builder().id(1L).firstName("Nikola").lastName("M").active(true).build();
+            Client milica = Client.builder().id(2L).firstName("Milica").lastName("N").email("milica@gmail.com").build();
+
+            CreateAccountDto dto = new CreateAccountDto();
+            dto.setAccountType(AccountType.CHECKING);
+            dto.setCurrency("RSD");
+            dto.setOwnerEmail("milica@gmail.com");
+            dto.setCompanyName("Test DOO");
+            dto.setRegistrationNumber("12345678");
+            dto.setTaxId("123456789");
+            dto.setActivityCode("62.01");
+            dto.setCreateCard(false);
+
+            when(currencyRepository.findByCode("RSD")).thenReturn(Optional.of(rsd));
+            when(employeeRepository.findByEmail("admin@banka.rs")).thenReturn(Optional.of(admin));
+            when(clientRepository.findByEmail("milica@gmail.com")).thenReturn(Optional.of(milica));
+            when(companyRepository.save(any(Company.class))).thenAnswer(inv -> {
+                Company c = inv.getArgument(0);
+                c.setId(1L);
+                return c;
+            });
+            when(accountRepository.existsByAccountNumber(any())).thenReturn(false);
+            when(accountRepository.save(any(Account.class))).thenAnswer(inv -> {
+                Account a = inv.getArgument(0);
+                a.setId(10L);
+                return a;
+            });
+
+            AccountResponseDto result = accountService.createAccount(dto);
+            assertNotNull(result);
+            verify(companyRepository).save(any(Company.class));
+        }
+
+        @Test
+        @DisplayName("kreira klijenta iz users tabele ako ne postoji u clients")
+        void createClientFromUsersTable() {
+            mockAuthenticatedUser("admin@banka.rs");
+
+            Currency rsd = Currency.builder().id(8L).code("RSD").build();
+            Employee admin = Employee.builder().id(1L).firstName("Nikola").lastName("M").active(true).build();
+
+            User user = new User();
+            user.setFirstName("Luka");
+            user.setLastName("S");
+            user.setEmail("luka@gmail.com");
+            user.setPassword("pass");
+
+            CreateAccountDto dto = new CreateAccountDto();
+            dto.setAccountType(AccountType.CHECKING);
+            dto.setCurrency("RSD");
+            dto.setOwnerEmail("luka@gmail.com");
+            dto.setCreateCard(false);
+
+            when(currencyRepository.findByCode("RSD")).thenReturn(Optional.of(rsd));
+            when(employeeRepository.findByEmail("admin@banka.rs")).thenReturn(Optional.of(admin));
+            when(clientRepository.findByEmail("luka@gmail.com")).thenReturn(Optional.empty());
+            when(userRepository.findByEmail("luka@gmail.com")).thenReturn(Optional.of(user));
+            when(clientRepository.save(any(Client.class))).thenAnswer(inv -> {
+                Client c = inv.getArgument(0);
+                c.setId(10L);
+                return c;
+            });
+            when(accountRepository.existsByAccountNumber(any())).thenReturn(false);
+            when(accountRepository.save(any(Account.class))).thenAnswer(inv -> {
+                Account a = inv.getArgument(0);
+                a.setId(20L);
+                return a;
+            });
+
+            AccountResponseDto result = accountService.createAccount(dto);
+            assertNotNull(result);
+            verify(clientRepository).save(any(Client.class)); // auto-kreiran client
+        }
+    }
+
+    @Nested
+    @DisplayName("getAllAccounts / getAccountsByClient")
+    class PortalQueries {
+
+        @Test
+        @DisplayName("getAllAccounts vraca paginiranu listu")
+        void getAllAccounts() {
+            Currency rsd = Currency.builder().id(8L).code("RSD").build();
+            Employee nikola = Employee.builder().id(1L).firstName("Nikola").lastName("M").build();
+            Client stefan = Client.builder().id(1L).firstName("Stefan").lastName("J").build();
+
+            Account a = Account.builder().id(1L).accountNumber("222000112345678911")
+                    .accountType(AccountType.CHECKING).accountSubtype(rs.raf.banka2_bek.account.model.AccountSubtype.STANDARD)
+                    .currency(rsd).client(stefan).employee(nikola)
+                    .balance(BigDecimal.valueOf(100000)).availableBalance(BigDecimal.valueOf(100000))
+                    .dailyLimit(BigDecimal.valueOf(250000)).monthlyLimit(BigDecimal.valueOf(1000000))
+                    .status(AccountStatus.ACTIVE).createdAt(LocalDateTime.now()).build();
+
+            Page<Account> page = new PageImpl<>(List.of(a), PageRequest.of(0, 10), 1);
+            when(accountRepository.findAllWithOwnerFilter(isNull(), any(PageRequest.class))).thenReturn(page);
+
+            Page<AccountResponseDto> result = accountService.getAllAccounts(0, 10, null);
+            assertEquals(1, result.getTotalElements());
+        }
+
+        @Test
+        @DisplayName("getAccountsByClient vraca samo racune jednog klijenta")
+        void getAccountsByClient() {
+            Currency rsd = Currency.builder().id(8L).code("RSD").build();
+            Employee nikola = Employee.builder().id(1L).firstName("Nikola").lastName("M").build();
+            Client stefan = Client.builder().id(1L).firstName("Stefan").lastName("J").build();
+
+            Account a1 = Account.builder().id(1L).accountNumber("111")
+                    .accountType(AccountType.CHECKING).currency(rsd).client(stefan).employee(nikola)
+                    .balance(BigDecimal.TEN).availableBalance(BigDecimal.TEN)
+                    .dailyLimit(BigDecimal.TEN).monthlyLimit(BigDecimal.TEN)
+                    .status(AccountStatus.ACTIVE).createdAt(LocalDateTime.now()).build();
+
+            when(accountRepository.findByClientId(1L)).thenReturn(List.of(a1));
+
+            List<AccountResponseDto> result = accountService.getAccountsByClient(1L);
+            assertEquals(1, result.size());
         }
     }
 }
