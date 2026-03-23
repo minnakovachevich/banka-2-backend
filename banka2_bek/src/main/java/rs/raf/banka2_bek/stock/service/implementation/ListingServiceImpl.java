@@ -4,9 +4,11 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Sort;
+import org.springframework.http.HttpStatus;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
+import org.springframework.web.server.ResponseStatusException;
 import rs.raf.banka2_bek.stock.dto.ListingDailyPriceDto;
 import rs.raf.banka2_bek.stock.dto.ListingDto;
 import rs.raf.banka2_bek.stock.mapper.ListingMapper;
@@ -31,11 +33,11 @@ public class ListingServiceImpl implements ListingService {
         try {
             listingType = ListingType.valueOf(type.toUpperCase());
         } catch (IllegalArgumentException | NullPointerException e) {
-            throw new IllegalArgumentException("Nepoznat tip hartije: " + type);
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Nepoznat tip hartije: " + type);
         }
 
         if (listingType == ListingType.FOREX && isClient()) {
-            throw new IllegalStateException("Klijenti nemaju pristup FOREX hartijama.");
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Klijenti nemaju pristup FOREX hartijama.");
         }
 
         var pageable = PageRequest.of(page, size, Sort.by("ticker").ascending());
