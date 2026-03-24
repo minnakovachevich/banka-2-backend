@@ -1,6 +1,8 @@
 package rs.raf.banka2_bek.stock.controller;
 
 import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.media.Content;
+import io.swagger.v3.oas.annotations.media.Schema;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
 import io.swagger.v3.oas.annotations.responses.ApiResponses;
 import io.swagger.v3.oas.annotations.tags.Tag;
@@ -8,6 +10,7 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.data.domain.Page;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+import rs.raf.banka2_bek.auth.dto.MessageResponseDto;
 import rs.raf.banka2_bek.stock.dto.ListingDailyPriceDto;
 import rs.raf.banka2_bek.stock.dto.ListingDto;
 import rs.raf.banka2_bek.stock.service.ListingService;
@@ -26,8 +29,10 @@ public class ListingController {
                description = "Filtrira hartije po tipu (STOCK, FOREX, FUTURES) i opcionalnom pojmu koji se poklapa sa ticker-om ili nazivom (case-insensitive). Klijenti ne mogu da pristupe FOREX hartijama.")
     @ApiResponses({
             @ApiResponse(responseCode = "200", description = "Uspesno vracena stranica hartija"),
-            @ApiResponse(responseCode = "400", description = "Nepoznat tip hartije"),
-            @ApiResponse(responseCode = "403", description = "Klijent pokusao da pristupi FOREX hartijama")
+            @ApiResponse(responseCode = "400", description = "Nepoznat tip hartije",
+                    content = @Content(schema = @Schema(implementation = MessageResponseDto.class))),
+            @ApiResponse(responseCode = "403", description = "Klijent pokusao da pristupi FOREX hartijama",
+                    content = @Content(schema = @Schema(implementation = MessageResponseDto.class)))
     })
     @GetMapping
     public ResponseEntity<Page<ListingDto>> getListings(
@@ -41,7 +46,8 @@ public class ListingController {
     @Operation(summary = "Get listing by ID")
     @ApiResponses({
             @ApiResponse(responseCode = "200", description = "Hartija pronadjena"),
-            @ApiResponse(responseCode = "404", description = "Hartija nije pronadjena")
+            @ApiResponse(responseCode = "404", description = "Hartija nije pronadjena",
+                    content = @Content(schema = @Schema(implementation = MessageResponseDto.class)))
     })
     @GetMapping("/{id}")
     public ResponseEntity<ListingDto> getListingById(@PathVariable Long id) {
@@ -52,7 +58,8 @@ public class ListingController {
                description = "Vraca istorijske dnevne cene za grafik. Parametar period: DAY, WEEK, MONTH, YEAR, FIVE_YEARS, ALL")
     @ApiResponses({
             @ApiResponse(responseCode = "200", description = "Istorija cena uspesno vracena"),
-            @ApiResponse(responseCode = "404", description = "Hartija nije pronadjena")
+            @ApiResponse(responseCode = "404", description = "Hartija nije pronadjena",
+                    content = @Content(schema = @Schema(implementation = MessageResponseDto.class)))
     })
     @GetMapping("/{id}/history")
     public ResponseEntity<List<ListingDailyPriceDto>> getListingHistory(
