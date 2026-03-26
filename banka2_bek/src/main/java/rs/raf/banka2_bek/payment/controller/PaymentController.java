@@ -63,9 +63,9 @@ public class PaymentController {
             @Parameter(description = "Pagination and sorting")
             @PageableDefault(size = 20, sort = "createdAt", direction = Sort.Direction.DESC) Pageable pageable,
             @Parameter(description = "Filter by createdAt >= fromDate (ISO-8601 date-time)")
-            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime fromDate,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) java.time.LocalDate fromDate,
             @Parameter(description = "Filter by createdAt <= toDate (ISO-8601 date-time)")
-            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime toDate,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) java.time.LocalDate toDate,
             @Parameter(description = "Minimum amount filter")
             @RequestParam(required = false) BigDecimal minAmount,
             @Parameter(description = "Maximum amount filter")
@@ -73,7 +73,9 @@ public class PaymentController {
             @Parameter(description = "Filter by payment status")
             @RequestParam(required = false) PaymentStatus status
     ) {
-        return ResponseEntity.ok(paymentService.getPayments(pageable, fromDate, toDate, minAmount, maxAmount, status));
+        java.time.LocalDateTime fromDateTime = fromDate != null ? fromDate.atStartOfDay() : null;
+        java.time.LocalDateTime toDateTime = toDate != null ? toDate.atTime(23, 59, 59) : null;
+        return ResponseEntity.ok(paymentService.getPayments(pageable, fromDateTime, toDateTime, minAmount, maxAmount, status));
     }
 
     @Operation(summary = "Get payment by ID", description = "Returns a payment if it belongs to the authenticated client.")
@@ -120,9 +122,9 @@ public class PaymentController {
             @Parameter(description = "Pagination and sorting")
             @PageableDefault(size = 20, sort = "createdAt", direction = Sort.Direction.DESC) Pageable pageable,
             @Parameter(description = "Filter by createdAt >= fromDate (ISO-8601 date-time)")
-            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime fromDate,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) java.time.LocalDate fromDate,
             @Parameter(description = "Filter by createdAt <= toDate (ISO-8601 date-time)")
-            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime toDate,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) java.time.LocalDate toDate,
             @Parameter(description = "Minimum amount filter")
             @RequestParam(required = false) BigDecimal minAmount,
             @Parameter(description = "Maximum amount filter")
@@ -134,12 +136,42 @@ public class PaymentController {
     }
 
     // FIXME: Ukloniti hardcoded kod 1234 kada Android app bude gotova
+    private final java.util.concurrent.ConcurrentHashMap<String, int[]> otpAttempts = new java.util.concurrent.ConcurrentHashMap<>();
+
     @PostMapping("/verify")
-    public ResponseEntity<java.util.Map<String, Object>> verifyPayment(@RequestBody java.util.Map<String, Object> request) {
+    public ResponseEntity<java.util.Map<String, Object>> verifyPayment(
+            @RequestBody java.util.Map<String, Object> request,
+            org.springframework.security.core.Authentication auth) {
+        String userKey = auth != null ? auth.getName() : "anonymous";
         String code = String.valueOf(request.getOrDefault("code", ""));
+
+        int[] attempts = otpAttempts.computeIfAbsent(userKey, k -> new int[]{0});
+
+        if (attempts[0] >= 3) {
+            otpAttempts.remove(userKey);
+            return ResponseEntity.ok(java.util.Map.of(
+                "verified", false,
+                "blocked", true,
+                "message", "Transakcija otkazana - previse neuspesnih pokusaja"));
+        }
+
         if ("1234".equals(code)) {
+            otpAttempts.remove(userKey);
             return ResponseEntity.ok(java.util.Map.of("verified", true, "message", "Transakcija uspesno verifikovana"));
         }
-        return ResponseEntity.ok(java.util.Map.of("verified", false, "message", "Pogresan verifikacioni kod"));
+
+        attempts[0]++;
+        int remaining = 3 - attempts[0];
+        if (remaining <= 0) {
+            otpAttempts.remove(userKey);
+            return ResponseEntity.ok(java.util.Map.of(
+                "verified", false,
+                "blocked", true,
+                "message", "Transakcija otkazana - previse neuspesnih pokusaja"));
+        }
+        return ResponseEntity.ok(java.util.Map.of(
+            "verified", false,
+            "blocked", false,
+            "message", "Pogresan verifikacioni kod. Preostalo pokusaja: " + remaining));
     }
 }
