@@ -132,7 +132,9 @@ public class PaymentController {
             @Parameter(description = "Filter by transaction type")
             @RequestParam(required = false) TransactionType type
     ) {
-        return ResponseEntity.ok(paymentService.getPaymentHistory(pageable, fromDate, toDate, minAmount, maxAmount, type));
+        java.time.LocalDateTime fromDateTime = fromDate != null ? fromDate.atStartOfDay() : null;
+        java.time.LocalDateTime toDateTime = toDate != null ? toDate.atTime(23, 59, 59) : null;
+        return ResponseEntity.ok(paymentService.getPaymentHistory(pageable, fromDateTime, toDateTime, minAmount, maxAmount, type));
     }
 
     // FIXME: Ukloniti hardcoded kod 1234 kada Android app bude gotova
