@@ -39,7 +39,7 @@ public class MarginAccount {
     @JoinColumn(name = "account_id", nullable = false)
     private Account account;
 
-    /** ID korisnika (klijenta ili zaposlenog) koji je vlasnik margin racuna */
+    /** ID korisnika (klijenta ili  koji je vlasnik margin racuna */
     @Column(name = "user_id", nullable = false)
     private Long userId;
 

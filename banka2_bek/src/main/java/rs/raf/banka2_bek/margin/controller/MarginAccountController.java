@@ -131,7 +131,7 @@ public class MarginAccountController {
             Authentication authentication
     ) {
         BigDecimal amount = body.get("amount");
-        marginAccountService.withdraw(id, amount);
+        marginAccountService.withdraw(id, amount, authentication);
         return ResponseEntity.ok(Map.of("message", "Withdrawal successful"));
     }
 

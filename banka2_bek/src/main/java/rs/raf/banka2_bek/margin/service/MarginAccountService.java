@@ -4,9 +4,15 @@ import jakarta.persistence.EntityNotFoundException;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.GrantedAuthority;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import rs.raf.banka2_bek.account.repository.AccountRepository;
+import rs.raf.banka2_bek.auth.config.GlobalSecurityConfig;
+import rs.raf.banka2_bek.auth.model.User;
+import rs.raf.banka2_bek.auth.repository.UserRepository;
 import rs.raf.banka2_bek.margin.dto.CreateMarginAccountDto;
 import rs.raf.banka2_bek.margin.dto.MarginAccountDto;
 import rs.raf.banka2_bek.margin.dto.MarginTransactionDto;
@@ -40,6 +46,7 @@ public class MarginAccountService {
     private final MarginAccountRepository marginAccountRepository;
     private final MarginTransactionRepository marginTransactionRepository;
     private final AccountRepository accountRepository;
+    private final UserRepository userRepository;
 
     /**
      * Podrazumevani procenat ucestva banke (50%)
@@ -138,12 +145,31 @@ public class MarginAccountService {
      * @param amount          iznos za isplatu
      */
     @Transactional
-    public void withdraw(Long marginAccountId, BigDecimal amount) {
+    public void withdraw(Long marginAccountId, BigDecimal amount, Authentication authentication) {
+
+        // double check for client role (already checked in global security config)
+        boolean client = false;
+        for (GrantedAuthority authority : authentication.getAuthorities()) {
+            if (authority.getAuthority() != null && authority.getAuthority().contains("CLIENT")) {
+                client = true;
+                break;
+            }
+        }
+        if (!client)
+            throw new IllegalStateException("Access denied.");
+
+        User user = userRepository.findByEmail(authentication.getName()).orElseThrow(
+                () -> new IllegalStateException("Access denied.")
+        );
 
         // 1. find MarginAccount by marginAccountId, if it doesn't exist exception is thrown
         MarginAccount marginAccount = marginAccountRepository.findById(marginAccountId).orElseThrow(
                 () -> new EntityNotFoundException("Account with id: " + marginAccountId)
         );
+
+        // CHECK ACCOUNT OWNERSHIP
+        if (!user.getId().equals(marginAccount.getUserId()))
+            throw new IllegalStateException("Access denied.");
 
         // 2. not active accounts can't do withdraw
         if (!marginAccount.getStatus().equals(MarginAccountStatus.ACTIVE))
