@@ -40,9 +40,15 @@ import rs.raf.banka2_bek.margin.model.MarginAccount;
 import rs.raf.banka2_bek.margin.model.MarginAccountStatus;
 import rs.raf.banka2_bek.margin.model.MarginTransactionType;
 
+import javax.sql.DataSource;
 import java.io.IOException;
 import java.math.BigDecimal;
+import java.sql.Connection;
+import java.sql.ResultSet;
+import java.sql.Statement;
 import java.time.LocalDate;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -98,8 +104,11 @@ class MarginAccountControllerIntegrationTest {
     @Autowired
     private ClientRepository clientRepository;
 
+    @Autowired
+    private DataSource dataSource;
+
     @BeforeEach
-    void cleanDatabase() {
+    void cleanDatabase() throws Exception {
         restTemplate.setErrorHandler(new DefaultResponseErrorHandler() {
             @Override
             public boolean hasError(ClientHttpResponse response) throws IOException {
@@ -107,16 +116,22 @@ class MarginAccountControllerIntegrationTest {
             }
         });
 
-        marginTransactionRepository.deleteAll();
-        marginAccountRepository.deleteAll();
-        accountRepository.deleteAll();
-        passwordResetTokenRepository.deleteAll();
-        activationTokenRepository.deleteAll();
-        actuaryInfoRepository.deleteAll();
-        employeeRepository.deleteAll();
-        userRepository.deleteAll();
-        clientRepository.deleteAll();
-        currencyRepository.deleteAll();
+        try (Connection conn = dataSource.getConnection();
+             Statement stmt = conn.createStatement()) {
+            stmt.execute("SET REFERENTIAL_INTEGRITY FALSE");
+
+            ResultSet rs = stmt.executeQuery(
+                    "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA='PUBLIC'");
+            List<String> tables = new ArrayList<>();
+            while (rs.next()) {
+                tables.add(rs.getString(1));
+            }
+            for (String table : tables) {
+                stmt.execute("TRUNCATE TABLE " + table);
+            }
+
+            stmt.execute("SET REFERENTIAL_INTEGRITY TRUE");
+        }
     }
 
     @Test
