@@ -9,9 +9,11 @@ import rs.raf.banka2_bek.berza.model.Exchange;
 import rs.raf.banka2_bek.berza.repository.ExchangeRepository;
 
 import java.time.DayOfWeek;
+import java.time.LocalDate;
 import java.time.LocalTime;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.List;
 
 /**
@@ -116,6 +118,46 @@ public class ExchangeManagementService {
         return now.isAfter(close) && now.isBefore(postEnd);
     }
 
+    /**
+     * Racuna kada se berza sledeci put otvara (ISO 8601 string).
+     * - Radni dan pre openTime: danas u openTime
+     * - Radni dan posle openTime (zatvorena posle closeTime): sledeci radni dan u openTime
+     * - Vikend: ponedeljak u openTime
+     */
+    private String calculateNextOpenTime(Exchange exchange) {
+        LocalTime openTime = exchange.getOpenTime();
+        if (openTime == null) {
+            return null;
+        }
+
+        ZoneId zone = ZoneId.of(exchange.getTimeZone());
+        ZonedDateTime nowZ = nowInExchangeZone(exchange);
+        DayOfWeek dow = nowZ.getDayOfWeek();
+        LocalTime now = nowZ.toLocalTime();
+
+        LocalDate nextOpenDate;
+        if (dow == DayOfWeek.SATURDAY) {
+            nextOpenDate = nowZ.toLocalDate().plusDays(2); // Monday
+        } else if (dow == DayOfWeek.SUNDAY) {
+            nextOpenDate = nowZ.toLocalDate().plusDays(1); // Monday
+        } else if (now.isBefore(openTime)) {
+            // Weekday, before opening
+            nextOpenDate = nowZ.toLocalDate();
+        } else {
+            // Weekday, after closing — next weekday
+            nextOpenDate = nowZ.toLocalDate().plusDays(1);
+            DayOfWeek nextDow = nextOpenDate.getDayOfWeek();
+            if (nextDow == DayOfWeek.SATURDAY) {
+                nextOpenDate = nextOpenDate.plusDays(2);
+            } else if (nextDow == DayOfWeek.SUNDAY) {
+                nextOpenDate = nextOpenDate.plusDays(1);
+            }
+        }
+
+        ZonedDateTime nextOpen = nextOpenDate.atTime(openTime).atZone(zone);
+        return nextOpen.format(DateTimeFormatter.ISO_OFFSET_DATE_TIME);
+    }
+
     // ── Helper metode ───────────────────────────────────────────────────────────
 
     private ExchangeDto toDto(Exchange exchange) {
@@ -144,7 +186,7 @@ public class ExchangeManagementService {
                 .active(exchange.isActive())
                 .isCurrentlyOpen(open)
                 .currentLocalTime(currentLocalTime)
-                .nextOpenTime(null) // TODO: Calculate next open time when closed
+                .nextOpenTime(open ? null : calculateNextOpenTime(exchange))
                 .build();
     }
 }

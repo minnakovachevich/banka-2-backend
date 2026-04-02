@@ -115,7 +115,7 @@ public class OrderServiceImpl implements OrderService {
             });
         }
 
-        // Step 10: Hook — orderExecutionService.scheduleExecution(savedOrder) — not yet implemented
+        // Step 10: Execution handled by OrderScheduler cron job
 
         return toDtoWithUserName(savedOrder);
     }

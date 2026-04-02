@@ -2,6 +2,7 @@ package rs.raf.banka2_bek.stock.service.implementation;
 
 import jakarta.persistence.EntityNotFoundException;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Sort;
@@ -34,6 +35,7 @@ import java.util.Random;
 
 @Service
 @RequiredArgsConstructor
+@Slf4j
 public class ListingServiceImpl implements ListingService {
 
     private final ListingRepository listingRepository;
@@ -197,18 +199,11 @@ public class ListingServiceImpl implements ListingService {
 
     @Override
     public void loadInitialData() {
-        // TODO: Implementirati ucitavanje pocetnih podataka
-        // OPCIJA 1: Ucitati iz CSV fajla (dummy podaci od generacije 2023/24)
-        //   - Fajl sa akcijama: AAPL, MSFT, GOOG, AMZN, TSLA, ...
-        //   - Fajl sa futures: CLJ26, SIH26, GCM26, ...
-        //   - Forex parovi: koristiti vec postojece iz exchange modula
-        //
-        // OPCIJA 2: AlphaVantage API
-        //   - Company Overview za akcije
-        //   - TIME_SERIES_DAILY za istorijske cene
-        //
-        // OPCIJA 3: Hardcoded dummy podaci u seed.sql
-        //   - INSERT INTO listings (...) VALUES (...)
-        //   - Najlaksi pristup, vec imamo seed mehanizam
+        long count = listingRepository.count();
+        if (count == 0) {
+            log.warn("No listings in database. Please ensure seed data is loaded.");
+        } else {
+            log.info("Found {} listings in database.", count);
+        }
     }
 }

@@ -50,6 +50,7 @@ public final class OrderMapper {
         dto.setCreatedAt(order.getCreatedAt());
         dto.setAccountId(order.getAccountId());
         dto.setApproximatePrice(calculateApproximatePrice(order));
+        dto.setListingSettlementDate(order.getListing() != null ? order.getListing().getSettlementDate() : null);
 
         return dto;
     }

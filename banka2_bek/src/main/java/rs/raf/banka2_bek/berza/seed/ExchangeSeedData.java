@@ -14,7 +14,7 @@ import java.util.List;
 /**
  * Seed komponenta koja popunjava tabelu berzi pri pokretanju aplikacije.
  * Pokrece se samo ako je tabela prazna (count == 0).
- * Dodaje 4 berze: NYSE, NASDAQ, LSE, BELEX.
+ * Dodaje 6 berzi: NYSE, NASDAQ, CME, LSE, XETRA, BELEX.
  */
 @Component
 @RequiredArgsConstructor
@@ -44,9 +44,19 @@ public class ExchangeSeedData implements ApplicationRunner {
                         .preMarketOpenTime(LocalTime.of(4, 0)).postMarketCloseTime(LocalTime.of(20, 0))
                         .build(),
                 Exchange.builder()
+                        .name("Chicago Mercantile Exchange").acronym("CME").micCode("XCME")
+                        .country("US").currency("USD").timeZone("America/Chicago")
+                        .openTime(LocalTime.of(8, 30)).closeTime(LocalTime.of(15, 0))
+                        .build(),
+                Exchange.builder()
                         .name("London Stock Exchange").acronym("LSE").micCode("XLON")
                         .country("GB").currency("GBP").timeZone("Europe/London")
                         .openTime(LocalTime.of(8, 0)).closeTime(LocalTime.of(16, 30))
+                        .build(),
+                Exchange.builder()
+                        .name("Deutsche Börse XETRA").acronym("XETRA").micCode("XETR")
+                        .country("DE").currency("EUR").timeZone("Europe/Berlin")
+                        .openTime(LocalTime.of(9, 0)).closeTime(LocalTime.of(17, 30))
                         .build(),
                 Exchange.builder()
                         .name("Belgrade Stock Exchange").acronym("BELEX").micCode("XBEL")

@@ -7,6 +7,8 @@ import org.slf4j.LoggerFactory;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import rs.raf.banka2_bek.account.model.Account;
+import rs.raf.banka2_bek.account.repository.AccountRepository;
 import rs.raf.banka2_bek.actuary.repository.ActuaryInfoRepository;
 import rs.raf.banka2_bek.employee.model.Employee;
 import rs.raf.banka2_bek.employee.repository.EmployeeRepository;
@@ -16,14 +18,18 @@ import rs.raf.banka2_bek.option.mapper.OptionMapper;
 import rs.raf.banka2_bek.option.model.Option;
 import rs.raf.banka2_bek.option.model.OptionType;
 import rs.raf.banka2_bek.option.repository.OptionRepository;
+import rs.raf.banka2_bek.portfolio.model.Portfolio;
+import rs.raf.banka2_bek.portfolio.repository.PortfolioRepository;
 import rs.raf.banka2_bek.stock.model.Listing;
 import rs.raf.banka2_bek.stock.repository.ListingRepository;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.LocalDate;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.stream.Collectors;
 
 @Service
@@ -36,6 +42,8 @@ public class OptionService {
     private final ListingRepository listingRepository;
     private final EmployeeRepository employeeRepository;
     private final ActuaryInfoRepository actuaryInfoRepository;
+    private final AccountRepository accountRepository;
+    private final PortfolioRepository portfolioRepository;
 
     public List<OptionChainDto> getOptionsForStock(Long listingId) {
         Listing listing = listingRepository.findById(listingId)
@@ -83,7 +91,7 @@ public class OptionService {
 
     @Transactional
     public void exerciseOption(Long optionId, String userEmail) {
-        ensureUserCanExerciseOptions(userEmail);
+        Employee employee = ensureUserCanExerciseOptions(userEmail);
 
         Option option = optionRepository.findById(optionId)
                 .orElseThrow(() -> new EntityNotFoundException("Option id: " + optionId + " not found."));
@@ -113,19 +121,136 @@ public class OptionService {
             throw new IllegalArgumentException("Opcija nema otvorenih ugovora za izvrsavanje.");
         }
 
+        Listing stockListing = option.getStockListing();
+        int contractSize = option.getContractSize();
+        BigDecimal totalCost = strikePrice.multiply(BigDecimal.valueOf(contractSize))
+                .setScale(4, RoundingMode.HALF_UP);
+
+        // Find bank account (Company ID = 3) — same pattern as OrderExecutionService
+        Account bankAccount = getBankAccount();
+
+        if (option.getOptionType() == OptionType.CALL) {
+            // CALL exercise: user pays strikePrice * contractSize, receives shares
+            // Debit the bank account
+            if (bankAccount.getAvailableBalance().compareTo(totalCost) < 0) {
+                throw new IllegalStateException(
+                        "Nedovoljno sredstava na racunu banke za izvrsavanje CALL opcije. Potrebno: " + totalCost
+                );
+            }
+            bankAccount.setBalance(bankAccount.getBalance().subtract(totalCost));
+            bankAccount.setAvailableBalance(bankAccount.getAvailableBalance().subtract(totalCost));
+            accountRepository.save(bankAccount);
+
+            // Add shares to portfolio
+            updatePortfolioBuy(employee.getId(), stockListing, contractSize, currentPrice);
+
+        } else {
+            // PUT exercise: user sells shares at strikePrice, receives cash
+            // Remove shares from portfolio (must own them)
+            updatePortfolioSell(employee.getId(), stockListing, contractSize);
+
+            // Credit the bank account
+            bankAccount.setBalance(bankAccount.getBalance().add(totalCost));
+            bankAccount.setAvailableBalance(bankAccount.getAvailableBalance().add(totalCost));
+            accountRepository.save(bankAccount);
+        }
+
+        // Decrement open interest
         option.setOpenInterest(option.getOpenInterest() - 1);
         optionRepository.save(option);
 
         log.info(
-                "Opcija {} (id={}) izvrsena od strane {}. Novi openInterest={}",
+                "Opcija {} (id={}) izvrsena od strane {}. Tip={}, strike={}, contractSize={}, totalCost={}. Novi openInterest={}",
                 option.getTicker(),
                 option.getId(),
                 userEmail,
+                option.getOptionType(),
+                strikePrice,
+                contractSize,
+                totalCost,
                 option.getOpenInterest()
         );
     }
 
-    private void ensureUserCanExerciseOptions(String userEmail) {
+    /**
+     * Adds shares to portfolio after CALL exercise.
+     * Same pattern as OrderExecutionService.updatePortfolio for BUY.
+     */
+    private void updatePortfolioBuy(Long userId, Listing listing, int quantity, BigDecimal price) {
+        Optional<Portfolio> existing = portfolioRepository.findByUserId(userId)
+                .stream()
+                .filter(p -> p.getListingId().equals(listing.getId()))
+                .findFirst();
+
+        if (existing.isPresent()) {
+            Portfolio portfolio = existing.get();
+            int oldQty = portfolio.getQuantity();
+            BigDecimal oldTotal = portfolio.getAverageBuyPrice().multiply(BigDecimal.valueOf(oldQty));
+            BigDecimal newFillTotal = price.multiply(BigDecimal.valueOf(quantity));
+            int newQty = oldQty + quantity;
+
+            BigDecimal newAvg = oldTotal.add(newFillTotal)
+                    .divide(BigDecimal.valueOf(newQty), 4, RoundingMode.HALF_UP);
+
+            portfolio.setQuantity(newQty);
+            portfolio.setAverageBuyPrice(newAvg);
+            portfolioRepository.save(portfolio);
+        } else {
+            Portfolio portfolio = new Portfolio();
+            portfolio.setUserId(userId);
+            portfolio.setListingId(listing.getId());
+            portfolio.setListingTicker(listing.getTicker());
+            portfolio.setListingName(listing.getName());
+            portfolio.setListingType(listing.getListingType().name());
+            portfolio.setQuantity(quantity);
+            portfolio.setAverageBuyPrice(price);
+            portfolio.setPublicQuantity(0);
+            portfolioRepository.save(portfolio);
+        }
+    }
+
+    /**
+     * Removes shares from portfolio after PUT exercise.
+     * Same pattern as OrderExecutionService.updatePortfolio for SELL.
+     */
+    private void updatePortfolioSell(Long userId, Listing listing, int quantity) {
+        Portfolio portfolio = portfolioRepository.findByUserId(userId)
+                .stream()
+                .filter(p -> p.getListingId().equals(listing.getId()))
+                .findFirst()
+                .orElseThrow(() -> new IllegalStateException(
+                        "Korisnik nema dovoljno akcija " + listing.getTicker() + " u portfoliju za PUT exercise."
+                ));
+
+        if (portfolio.getQuantity() < quantity) {
+            throw new IllegalStateException(
+                    "Nedovoljno akcija " + listing.getTicker() + " u portfoliju. Potrebno: " + quantity +
+                            ", dostupno: " + portfolio.getQuantity()
+            );
+        }
+
+        int newQty = portfolio.getQuantity() - quantity;
+        if (newQty <= 0) {
+            portfolioRepository.delete(portfolio);
+        } else {
+            portfolio.setQuantity(newQty);
+            portfolioRepository.save(portfolio);
+        }
+    }
+
+    /**
+     * Finds the bank account (Company ID = 3) in USD.
+     * Same pattern as OrderExecutionService.getBankAccount.
+     */
+    private Account getBankAccount() {
+        return accountRepository.findAll().stream()
+                .filter(a -> a.getCompany() != null && a.getCompany().getId() == 3L)
+                .filter(a -> "USD".equals(a.getCurrency().getCode()))
+                .findFirst()
+                .orElseThrow(() -> new IllegalStateException("Bank USD account not found!"));
+    }
+
+    private Employee ensureUserCanExerciseOptions(String userEmail) {
         Employee employee = employeeRepository.findByEmail(userEmail)
                 .orElseThrow(() -> new AccessDeniedException("Samo aktuar moze da izvrsi opciju."));
 
@@ -139,5 +264,7 @@ public class OptionService {
         if (!adminEmployee && !actuaryExists) {
             throw new AccessDeniedException("Samo aktuar moze da izvrsi opciju.");
         }
+
+        return employee;
     }
 }

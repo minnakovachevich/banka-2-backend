@@ -15,9 +15,9 @@ import rs.raf.banka2_bek.tax.service.TaxService;
  * <p>
  * Specifikacija: Celina 3 - Porez na kapitalnu dobit (15%)
  * <p>
- * TODO (buducnost): Poslati email notifikacije korisnicima sa novim poreskim obavezama
- *      - Za svakog korisnika ciji se taxOwed promenio, poslati email
- *      - Email template: "Postovani, obracunat vam je porez od X RSD za mesec Y"
+ * Nakon obracuna, loguje notifikaciju o poreskim obavezama.
+ * Kada se implementira TaxEmailTemplate, ovde dodati slanje emailova
+ * korisnicima ciji se taxOwed promenio (koristeci MailNotificationService).
  */
 @Component
 @RequiredArgsConstructor
@@ -38,6 +38,7 @@ public class TaxScheduler {
         try {
             taxService.calculateTaxForAllUsers();
             log.info("Monthly tax calculation completed successfully.");
+            log.info("Tax calculation complete. Email notifications for users with outstanding tax would be sent here.");
         } catch (Exception e) {
             log.error("Error during tax calculation: {}", e.getMessage(), e);
         }
