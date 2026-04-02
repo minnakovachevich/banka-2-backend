@@ -48,7 +48,31 @@ public class PaymentController {
             @ApiResponse(responseCode = "404", description = "Business validation failed (e.g. account not found)")
     })
     @PostMapping
-    public ResponseEntity<PaymentResponseDto> createPayment(@Valid @RequestBody CreatePaymentRequestDto request) {
+    public ResponseEntity<PaymentResponseDto> createPayment(
+            @Valid @RequestBody CreatePaymentRequestDto request,
+            org.springframework.security.core.Authentication auth) {
+        String email = auth != null ? auth.getName() : null;
+        if (email == null) {
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
+        }
+
+        // OTP verifikacija: kod mora biti verifikovan PRE kreiranja placanja
+        // Frontend flow: request-otp -> verify (sa kodom) -> createPayment
+        // verify markira OTP kao "verified" ali ne "used"
+        // createPayment proverava da postoji verified OTP i markira ga kao used
+        String otpCode = request.getOtpCode();
+        if (otpCode == null || otpCode.isBlank()) {
+            return ResponseEntity.badRequest().build();
+        }
+
+        // Verifikuj i potroši OTP kod atomično
+        java.util.Map<String, Object> verifyResult = otpService.verify(email, otpCode);
+        boolean verified = Boolean.TRUE.equals(verifyResult.get("verified"));
+        if (!verified) {
+            return ResponseEntity.status(HttpStatus.FORBIDDEN)
+                    .body(null);
+        }
+
         return ResponseEntity.status(HttpStatus.CREATED).body(paymentService.createPayment(request));
     }
 
@@ -152,6 +176,31 @@ public class PaymentController {
         return ResponseEntity.ok(java.util.Map.of(
                 "sent", true,
                 "message", "Verifikacioni kod je poslat na vas email"));
+    }
+
+    @Operation(summary = "Request OTP via email", description = "Generates OTP and sends it to the user's email as fallback when mobile app is not available.")
+    @PostMapping("/request-otp-email")
+    public ResponseEntity<java.util.Map<String, Object>> requestOtpViaEmail(
+            org.springframework.security.core.Authentication auth) {
+        String email = auth != null ? auth.getName() : null;
+        if (email == null) {
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
+        }
+        otpService.generateAndSendViaEmail(email);
+        return ResponseEntity.ok(java.util.Map.of(
+                "sent", true,
+                "message", "Verifikacioni kod je poslat na vas email"));
+    }
+
+    @Operation(summary = "Get active OTP", description = "Returns the active OTP code for the authenticated user (used by mobile app).")
+    @GetMapping("/my-otp")
+    public ResponseEntity<java.util.Map<String, Object>> getMyOtp(
+            org.springframework.security.core.Authentication auth) {
+        String email = auth != null ? auth.getName() : null;
+        if (email == null) {
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
+        }
+        return ResponseEntity.ok(otpService.getActiveOtp(email));
     }
 
     @Operation(summary = "Verify OTP code", description = "Verifies the OTP code for payment confirmation.")

@@ -49,7 +49,46 @@ public class OtpService {
 
         otpRepository.save(otp);
 
+        // OTP se prikazuje na mobilnoj aplikaciji - email se ne salje
+    }
+
+    @Transactional
+    public void generateAndSendViaEmail(String email) {
+        otpRepository.findTopByEmailAndUsedFalseOrderByCreatedAtDesc(email)
+                .ifPresent(existing -> {
+                    existing.setUsed(true);
+                    otpRepository.save(existing);
+                });
+
+        String code = String.format("%06d", secureRandom.nextInt(1_000_000));
+
+        OtpVerification otp = OtpVerification.builder()
+                .email(email)
+                .code(code)
+                .expiresAt(LocalDateTime.now().plusMinutes(expiryMinutes))
+                .build();
+
+        otpRepository.save(otp);
         mailNotificationService.sendOtpMail(email, code, expiryMinutes);
+    }
+
+    @Transactional(readOnly = true)
+    public Map<String, Object> getActiveOtp(String email) {
+        OtpVerification otp = otpRepository.findTopByEmailAndUsedFalseOrderByCreatedAtDesc(email)
+                .orElse(null);
+
+        if (otp == null || otp.isExpired()) {
+            return Map.of("active", false, "message", "Nema aktivnog verifikacionog koda.");
+        }
+
+        long secondsLeft = java.time.Duration.between(LocalDateTime.now(), otp.getExpiresAt()).getSeconds();
+
+        return Map.of(
+                "active", true,
+                "code", otp.getCode(),
+                "expiresInSeconds", Math.max(secondsLeft, 0),
+                "attempts", otp.getAttempts(),
+                "maxAttempts", maxAttempts);
     }
 
     @Transactional
