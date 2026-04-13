@@ -20,6 +20,7 @@ import rs.raf.banka2_bek.employee.repository.EmployeeRepository;
 import rs.raf.banka2_bek.order.dto.CreateOrderDto;
 import rs.raf.banka2_bek.order.dto.OrderDto;
 import rs.raf.banka2_bek.order.exception.InsufficientFundsException;
+import rs.raf.banka2_bek.order.exception.InsufficientHoldingsException;
 import rs.raf.banka2_bek.order.mapper.OrderMapper;
 import rs.raf.banka2_bek.order.model.Order;
 import rs.raf.banka2_bek.order.model.OrderDirection;
@@ -29,12 +30,13 @@ import rs.raf.banka2_bek.order.repository.OrderRepository;
 import rs.raf.banka2_bek.order.service.BankTradingAccountResolver;
 import rs.raf.banka2_bek.order.service.CurrencyConversionService;
 import rs.raf.banka2_bek.order.service.FundReservationService;
-import rs.raf.banka2_bek.order.service.FundsVerificationService;
 import rs.raf.banka2_bek.order.service.ListingPriceService;
 import rs.raf.banka2_bek.order.service.OrderService;
 import rs.raf.banka2_bek.order.service.OrderStatusService;
 import rs.raf.banka2_bek.order.service.OrderValidationService;
 import rs.raf.banka2_bek.berza.service.ExchangeManagementService;
+import rs.raf.banka2_bek.portfolio.model.Portfolio;
+import rs.raf.banka2_bek.portfolio.repository.PortfolioRepository;
 import rs.raf.banka2_bek.stock.model.Listing;
 import rs.raf.banka2_bek.stock.model.ListingType;
 import rs.raf.banka2_bek.stock.repository.ListingRepository;
@@ -55,13 +57,13 @@ public class OrderServiceImpl implements OrderService {
     private final EmployeeRepository employeeRepository;
     private final OrderValidationService orderValidationService;
     private final ListingPriceService listingPriceService;
-    private final FundsVerificationService fundsVerificationService;
     private final OrderStatusService orderStatusService;
     private final ExchangeManagementService exchangeManagementService;
     private final AccountRepository accountRepository;
     private final FundReservationService fundReservationService;
     private final BankTradingAccountResolver bankTradingAccountResolver;
     private final CurrencyConversionService currencyConversionService;
+    private final PortfolioRepository portfolioRepository;
 
     @Override
     @Transactional
@@ -89,6 +91,7 @@ public class OrderServiceImpl implements OrderService {
         //         i izracunaj rezervacioni iznos u valuti tog racuna
         String listingCurrencyCode = resolveListingCurrency(listing);
         Account account;
+        Portfolio portfolio = null;
         if (direction == OrderDirection.BUY) {
             if (isEmployee) {
                 account = bankTradingAccountResolver.resolve(listingCurrencyCode);
@@ -97,8 +100,23 @@ public class OrderServiceImpl implements OrderService {
                         .orElseThrow(() -> new EntityNotFoundException("Racun ne postoji: " + dto.getAccountId()));
             }
         } else {
-            // SELL — TODO Phase 4: reservation za portfolio
-            account = null;
+            // SELL — portfolio rezervacija hartija
+            if (isEmployee) {
+                account = bankTradingAccountResolver.resolve(listingCurrencyCode);
+            } else {
+                account = accountRepository.findForUpdateById(dto.getAccountId())
+                        .orElseThrow(() -> new EntityNotFoundException("Racun ne postoji: " + dto.getAccountId()));
+            }
+            portfolio = portfolioRepository
+                    .findByUserIdAndListingIdForUpdate(userContext.userId, listing.getId())
+                    .orElseThrow(() -> new InsufficientHoldingsException(
+                            "Nemate ovu hartiju u portfoliju"));
+            int available = portfolio.getAvailableQuantity();
+            if (available < dto.getQuantity()) {
+                throw new InsufficientHoldingsException(
+                        "Nedovoljno raspolozivih hartija. Dostupno: " + available
+                                + ", traženo: " + dto.getQuantity());
+            }
         }
 
         BigDecimal exchangeRate = null;
@@ -120,18 +138,21 @@ public class OrderServiceImpl implements OrderService {
             }
             totalReservation = approxInAccountCurrency.add(commissionInAccountCurrency)
                     .setScale(4, RoundingMode.HALF_UP);
+        } else if (direction == OrderDirection.SELL && account != null) {
+            // Za SELL ne rezervisemo novac; ipak sacuvamo kurs listing→receiving account
+            // kako bi fill engine znao u kojoj valuti da prihoduje pare na receiving racun.
+            String accountCurrencyCode = account.getCurrency().getCode();
+            exchangeRate = currencyConversionService.getRate(listingCurrencyCode, accountCurrencyCode);
         }
 
-        // Step 6: Verify funds / securities
-        //   BUY (klijent + agent): koristimo availableBalance proveru na resolvovanom racunu
-        //   SELL: postojeca logika (portfolio check) — TODO Phase 4 zameniti sa reservedQuantity
+        // Step 6: Verify funds / holdings
+        //   BUY: availableBalance >= totalReservation
+        //   SELL: portfolio.availableQuantity >= dto.quantity (provereno iznad pri portfolio lookup-u)
         if (direction == OrderDirection.BUY && account != null && totalReservation != null) {
             if (account.getAvailableBalance().compareTo(totalReservation) < 0) {
                 throw new InsufficientFundsException(
                         "Nedovoljno raspolozivih sredstava na racunu " + account.getAccountNumber());
             }
-        } else if (direction == OrderDirection.SELL) {
-            fundsVerificationService.verify(dto, userContext.userId, approximatePrice, listing, orderType, direction);
         }
 
         // Step 7: Determine status
@@ -160,6 +181,14 @@ public class OrderServiceImpl implements OrderService {
             if (isEmployee) {
                 order.setAccountId(account.getId());
             }
+        } else if (direction == OrderDirection.SELL && account != null) {
+            // Za SELL "reservedAccountId" drzi receiving account (kuda idu pare po fill-u).
+            // reservedAmount ostaje null — nema novcane rezervacije.
+            order.setReservedAccountId(account.getId());
+            order.setExchangeRate(exchangeRate);
+            if (isEmployee) {
+                order.setAccountId(account.getId());
+            }
         }
 
         if (status == OrderStatus.APPROVED) {
@@ -168,11 +197,12 @@ public class OrderServiceImpl implements OrderService {
 
         Order savedOrder = orderRepository.save(order);
 
-        // Step 10: Rezervacija sredstava za BUY ordere koji su odmah APPROVED
-        if (direction == OrderDirection.BUY && status == OrderStatus.APPROVED && account != null) {
+        // Step 10: Rezervacija (sredstva za BUY, kolicina hartija za SELL) za APPROVED ordere
+        if (status == OrderStatus.APPROVED && direction == OrderDirection.BUY && account != null) {
             fundReservationService.reserveForBuy(savedOrder, account);
+        } else if (status == OrderStatus.APPROVED && direction == OrderDirection.SELL && portfolio != null) {
+            fundReservationService.reserveForSell(savedOrder, portfolio);
         }
-        // TODO Phase 4: reserveForSell za SELL ordere
 
         // Step 11: Update agent usedLimit if APPROVED
         if (status == OrderStatus.APPROVED && isEmployee) {

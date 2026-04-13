@@ -35,6 +35,8 @@ import rs.raf.banka2_bek.order.model.OrderStatus;
 import rs.raf.banka2_bek.order.model.OrderType;
 import rs.raf.banka2_bek.order.repository.OrderRepository;
 import rs.raf.banka2_bek.currency.model.Currency;
+import rs.raf.banka2_bek.portfolio.model.Portfolio;
+import rs.raf.banka2_bek.portfolio.repository.PortfolioRepository;
 import rs.raf.banka2_bek.order.service.implementation.OrderServiceImpl;
 import rs.raf.banka2_bek.berza.service.ExchangeManagementService;
 import rs.raf.banka2_bek.stock.model.Listing;
@@ -48,6 +50,7 @@ import java.util.Optional;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
@@ -71,6 +74,7 @@ class OrderServiceImplTest {
     @Mock private FundReservationService fundReservationService;
     @Mock private BankTradingAccountResolver bankTradingAccountResolver;
     @Mock private CurrencyConversionService currencyConversionService;
+    @Mock private PortfolioRepository portfolioRepository;
 
     @InjectMocks
     private OrderServiceImpl orderService;
@@ -80,6 +84,7 @@ class OrderServiceImplTest {
     private Employee testEmployee;
     private Account testClientAccount;
     private Account testBankUsdAccount;
+    private Portfolio testPortfolio;
 
     private Currency usd() {
         Currency c = new Currency();
@@ -133,10 +138,24 @@ class OrderServiceImplTest {
                 .accountCategory(AccountCategory.BANK_TRADING)
                 .build();
 
+        testPortfolio = new Portfolio();
+        testPortfolio.setId(500L);
+        testPortfolio.setUserId(42L);
+        testPortfolio.setListingId(1L);
+        testPortfolio.setListingTicker("AAPL");
+        testPortfolio.setListingName("Apple Inc.");
+        testPortfolio.setListingType("STOCK");
+        testPortfolio.setQuantity(30);
+        testPortfolio.setReservedQuantity(0);
+        testPortfolio.setPublicQuantity(0);
+        testPortfolio.setAverageBuyPrice(new BigDecimal("140.0000"));
+
         // Default stubovi za Phase 3 servise — strictness=LENIENT pa ne smetaju
         // testovima koji ne idu kroz createOrder.
         lenient().when(accountRepository.findForUpdateById(100L)).thenReturn(Optional.of(testClientAccount));
         lenient().when(bankTradingAccountResolver.resolve(anyString())).thenReturn(testBankUsdAccount);
+        lenient().when(portfolioRepository.findByUserIdAndListingIdForUpdate(anyLong(), anyLong()))
+                .thenReturn(Optional.of(testPortfolio));
         lenient().when(currencyConversionService.getRate(anyString(), anyString())).thenReturn(BigDecimal.ONE);
         lenient().when(currencyConversionService.convert(any(BigDecimal.class), anyString(), anyString()))
                 .thenAnswer(inv -> inv.getArgument(0));
@@ -565,6 +584,160 @@ class OrderServiceImplTest {
 
             verify(orderRepository, never()).save(any());
             verify(fundReservationService, never()).reserveForBuy(any(), any());
+        }
+    }
+
+    @Nested
+    @DisplayName("Phase 4 — SELL flow sa portfolio rezervacijom")
+    class Phase4SellFlow {
+
+        private CreateOrderDto validMarketSellDto() {
+            CreateOrderDto dto = new CreateOrderDto();
+            dto.setListingId(1L);
+            dto.setOrderType("MARKET");
+            dto.setDirection("SELL");
+            dto.setQuantity(5);
+            dto.setContractSize(1);
+            dto.setAccountId(100L);
+            return dto;
+        }
+
+        @Test
+        @DisplayName("CLIENT SELL — rezervise kolicinu u portfoliu, status APPROVED")
+        void createOrder_clientSell_reservesPortfolioQuantity_statusApproved() {
+            CreateOrderDto dto = validMarketSellDto();
+            mockSecurityContext("client@test.com");
+
+            when(orderValidationService.parseDirection(anyString())).thenReturn(OrderDirection.SELL);
+            when(clientRepository.findByEmail("client@test.com")).thenReturn(Optional.of(testClient));
+            when(listingRepository.findById(1L)).thenReturn(Optional.of(testListing));
+            when(listingPriceService.getPricePerUnit(any(), any(), any(), any())).thenReturn(new BigDecimal("149"));
+            when(listingPriceService.calculateApproximatePrice(anyInt(), any(), anyInt())).thenReturn(new BigDecimal("745.0000"));
+            when(orderStatusService.determineStatus(eq("CLIENT"), eq(42L), any())).thenReturn(OrderStatus.APPROVED);
+            when(orderRepository.save(any())).thenAnswer(inv -> {
+                Order o = inv.getArgument(0);
+                o.setId(1001L);
+                return o;
+            });
+
+            orderService.createOrder(dto);
+
+            ArgumentCaptor<Order> captor = ArgumentCaptor.forClass(Order.class);
+            verify(orderRepository).save(captor.capture());
+            Order saved = captor.getValue();
+            assertEquals(OrderStatus.APPROVED, saved.getStatus());
+            assertEquals(OrderDirection.SELL, saved.getDirection());
+            assertEquals(testClientAccount.getId(), saved.getReservedAccountId());
+
+            verify(fundReservationService).reserveForSell(any(Order.class), eq(testPortfolio));
+            // BUY rezervacija ne sme biti pozvana
+            verify(fundReservationService, never()).reserveForBuy(any(), any());
+        }
+
+        @Test
+        @DisplayName("CLIENT SELL — odbija kolicinu 27 kada je dostupno samo 3 (reservedQuantity=27)")
+        void createOrder_clientSell_rejects27_whenOnlyThreeAvailable() {
+            CreateOrderDto dto = validMarketSellDto();
+            dto.setQuantity(27);
+            mockSecurityContext("client@test.com");
+
+            // Portfolio ima 30 total, ali 27 je vec rezervisano → dostupno 3
+            testPortfolio.setReservedQuantity(27);
+
+            when(orderValidationService.parseDirection(anyString())).thenReturn(OrderDirection.SELL);
+            when(clientRepository.findByEmail("client@test.com")).thenReturn(Optional.of(testClient));
+            when(listingRepository.findById(1L)).thenReturn(Optional.of(testListing));
+            when(listingPriceService.getPricePerUnit(any(), any(), any(), any())).thenReturn(new BigDecimal("149"));
+            when(listingPriceService.calculateApproximatePrice(anyInt(), any(), anyInt())).thenReturn(new BigDecimal("4023.0000"));
+
+            rs.raf.banka2_bek.order.exception.InsufficientHoldingsException ex = assertThrows(
+                    rs.raf.banka2_bek.order.exception.InsufficientHoldingsException.class,
+                    () -> orderService.createOrder(dto));
+            assertTrue(ex.getMessage().contains("Nedovoljno"));
+
+            verify(orderRepository, never()).save(any());
+            verify(fundReservationService, never()).reserveForSell(any(), any());
+        }
+
+        @Test
+        @DisplayName("CLIENT SELL — baca InsufficientHoldings kada portfolio ne postoji")
+        void createOrder_clientSell_throwsWhenNoPortfolio() {
+            CreateOrderDto dto = validMarketSellDto();
+            mockSecurityContext("client@test.com");
+
+            when(orderValidationService.parseDirection(anyString())).thenReturn(OrderDirection.SELL);
+            when(clientRepository.findByEmail("client@test.com")).thenReturn(Optional.of(testClient));
+            when(listingRepository.findById(1L)).thenReturn(Optional.of(testListing));
+            when(listingPriceService.getPricePerUnit(any(), any(), any(), any())).thenReturn(new BigDecimal("149"));
+            when(listingPriceService.calculateApproximatePrice(anyInt(), any(), anyInt())).thenReturn(new BigDecimal("745.0000"));
+            when(portfolioRepository.findByUserIdAndListingIdForUpdate(42L, 1L)).thenReturn(Optional.empty());
+
+            assertThrows(rs.raf.banka2_bek.order.exception.InsufficientHoldingsException.class,
+                    () -> orderService.createOrder(dto));
+
+            verify(orderRepository, never()).save(any());
+            verify(fundReservationService, never()).reserveForSell(any(), any());
+        }
+
+        @Test
+        @DisplayName("AGENT SELL — koristi bankin receiving racun, portfolio rezervacija ide")
+        void createOrder_agentSell_usesBankTradingReceivingAccount() {
+            CreateOrderDto dto = validMarketSellDto();
+            mockSecurityContext("agent@test.com");
+
+            // Agent portfolio — premapiramo na employee userId=99
+            Portfolio agentPortfolio = new Portfolio();
+            agentPortfolio.setId(501L);
+            agentPortfolio.setUserId(99L);
+            agentPortfolio.setListingId(1L);
+            agentPortfolio.setListingTicker("AAPL");
+            agentPortfolio.setListingName("Apple Inc.");
+            agentPortfolio.setListingType("STOCK");
+            agentPortfolio.setQuantity(20);
+            agentPortfolio.setReservedQuantity(0);
+            agentPortfolio.setPublicQuantity(0);
+            agentPortfolio.setAverageBuyPrice(new BigDecimal("140.0000"));
+
+            ActuaryInfo agentInfo = new ActuaryInfo();
+            agentInfo.setActuaryType(ActuaryType.AGENT);
+            agentInfo.setUsedLimit(BigDecimal.ZERO);
+            agentInfo.setDailyLimit(new BigDecimal("100000"));
+            agentInfo.setNeedApproval(false);
+
+            when(orderValidationService.parseDirection(anyString())).thenReturn(OrderDirection.SELL);
+            when(clientRepository.findByEmail("agent@test.com")).thenReturn(Optional.empty());
+            when(employeeRepository.findByEmail("agent@test.com")).thenReturn(Optional.of(testEmployee));
+            when(listingRepository.findById(1L)).thenReturn(Optional.of(testListing));
+            when(listingPriceService.getPricePerUnit(any(), any(), any(), any())).thenReturn(new BigDecimal("149"));
+            when(listingPriceService.calculateApproximatePrice(anyInt(), any(), anyInt())).thenReturn(new BigDecimal("745.0000"));
+            when(portfolioRepository.findByUserIdAndListingIdForUpdate(99L, 1L))
+                    .thenReturn(Optional.of(agentPortfolio));
+            when(orderStatusService.determineStatus(eq("EMPLOYEE"), eq(99L), any())).thenReturn(OrderStatus.APPROVED);
+            when(orderStatusService.getAgentInfo(99L)).thenReturn(Optional.of(agentInfo));
+            when(orderRepository.save(any())).thenAnswer(inv -> {
+                Order o = inv.getArgument(0);
+                o.setId(1002L);
+                return o;
+            });
+
+            orderService.createOrder(dto);
+
+            // Bank trading USD racun je resolvovan za NASDAQ listing
+            verify(bankTradingAccountResolver).resolve("USD");
+
+            ArgumentCaptor<Order> captor = ArgumentCaptor.forClass(Order.class);
+            verify(orderRepository).save(captor.capture());
+            Order saved = captor.getValue();
+            assertEquals("EMPLOYEE", saved.getUserRole());
+            assertEquals(OrderDirection.SELL, saved.getDirection());
+            // Bank account se koristi kao receiving — i accountId i reservedAccountId
+            assertEquals(testBankUsdAccount.getId(), saved.getReservedAccountId());
+            assertEquals(testBankUsdAccount.getId(), saved.getAccountId());
+
+            // Agent portfolio se rezervise
+            verify(fundReservationService).reserveForSell(any(Order.class), eq(agentPortfolio));
+            // Klijentski racuni NE smeju biti ucitani za agenta
+            verify(accountRepository, never()).findForUpdateById(any());
         }
     }
 
