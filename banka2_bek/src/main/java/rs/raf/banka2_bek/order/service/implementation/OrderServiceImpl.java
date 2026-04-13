@@ -265,8 +265,8 @@ public class OrderServiceImpl implements OrderService {
     @Override
     @Transactional
     public OrderDto approveOrder(Long orderId) {
-        Order order = orderRepository.findById(orderId)
-                .orElseThrow(() -> new EntityNotFoundException("Order not found"+ orderId));
+        Order order = orderRepository.findByIdForUpdate(orderId)
+                .orElseThrow(() -> new EntityNotFoundException("Order not found" + orderId));
 
         if (order.getStatus() != OrderStatus.PENDING) {
             throw new IllegalStateException("Only PENDING orders can be approved");
@@ -283,20 +283,93 @@ public class OrderServiceImpl implements OrderService {
             Order saved = orderRepository.save(order);
             return toDtoWithUserName(saved);
         }
+
+        // Phase 5.1: Rezervacija sredstava / hartija u trenutku odobravanja.
+        // Cena se mogla promeniti izmedju PENDING i sada — koristimo
+        // order.approximatePrice kao polaznu tacku (vec izracunato pri createOrder).
+        boolean isEmployee = "EMPLOYEE".equals(order.getUserRole());
+        String listingCurrencyCode = resolveListingCurrency(listing);
+        BigDecimal totalReservation = null;
+
+        if (order.getDirection() == OrderDirection.BUY) {
+            Account account;
+            if (isEmployee) {
+                account = bankTradingAccountResolver.resolve(listingCurrencyCode);
+            } else {
+                Long accountId = order.getAccountId() != null
+                        ? order.getAccountId()
+                        : order.getReservedAccountId();
+                if (accountId == null) {
+                    throw new EntityNotFoundException("Order nema povezan racun za rezervaciju");
+                }
+                account = accountRepository.findForUpdateById(accountId)
+                        .orElseThrow(() -> new EntityNotFoundException("Racun ne postoji: " + accountId));
+            }
+
+            String accountCurrencyCode = account.getCurrency().getCode();
+            BigDecimal exchangeRate = currencyConversionService.getRate(listingCurrencyCode, accountCurrencyCode);
+            BigDecimal approxInListing = order.getApproximatePrice() != null
+                    ? order.getApproximatePrice()
+                    : BigDecimal.ZERO;
+            BigDecimal approxInAccountCurrency = currencyConversionService.convert(
+                    approxInListing, listingCurrencyCode, accountCurrencyCode);
+
+            BigDecimal commissionInAccountCurrency;
+            if (isEmployee) {
+                commissionInAccountCurrency = BigDecimal.ZERO;
+            } else {
+                BigDecimal commissionInListing = calculateCommissionInListingCurrency(
+                        approxInListing, order.getOrderType());
+                commissionInAccountCurrency = currencyConversionService.convert(
+                        commissionInListing, listingCurrencyCode, accountCurrencyCode);
+            }
+            totalReservation = approxInAccountCurrency.add(commissionInAccountCurrency)
+                    .setScale(4, RoundingMode.HALF_UP);
+
+            if (account.getAvailableBalance().compareTo(totalReservation) < 0) {
+                throw new InsufficientFundsException(
+                        "Nedovoljno sredstava u trenutku odobravanja na racunu " + account.getAccountNumber());
+            }
+
+            order.setReservedAccountId(account.getId());
+            order.setReservedAmount(totalReservation);
+            order.setExchangeRate(exchangeRate);
+            if (isEmployee) {
+                order.setAccountId(account.getId());
+            }
+            fundReservationService.reserveForBuy(order, account);
+        } else if (order.getDirection() == OrderDirection.SELL) {
+            Portfolio portfolio = portfolioRepository
+                    .findByUserIdAndListingIdForUpdate(order.getUserId(), listing.getId())
+                    .orElseThrow(() -> new InsufficientHoldingsException(
+                            "Nemate ovu hartiju u portfoliju"));
+            if (portfolio.getAvailableQuantity() < order.getQuantity()) {
+                throw new InsufficientHoldingsException(
+                        "Nedovoljno raspolozivih hartija. Dostupno: "
+                                + portfolio.getAvailableQuantity() + ", traženo: " + order.getQuantity());
+            }
+            fundReservationService.reserveForSell(order, portfolio);
+        }
+
         order.setStatus(OrderStatus.APPROVED);
         order.setApprovedBy(supervisorName);
+        order.setApprovedAt(LocalDateTime.now());
         order.setLastModification(LocalDateTime.now());
 
         Order saved = orderRepository.save(order);
 
-        // Update agent usedLimit when supervisor approves
-        if ("EMPLOYEE".equals(order.getUserRole())) {
+        // Update agent usedLimit when supervisor approves — koristimo totalReservation
+        // (u valuti racuna) kao delta. Za SELL nema novcane rezervacije pa padamo na
+        // approximatePrice fallback radi backward compat.
+        if (isEmployee) {
+            final BigDecimal limitDelta = totalReservation != null
+                    ? totalReservation
+                    : (order.getApproximatePrice() != null ? order.getApproximatePrice() : BigDecimal.ZERO);
             Optional<ActuaryInfo> actuaryOpt = orderStatusService.getAgentInfo(order.getUserId());
             actuaryOpt.ifPresent(actuary -> {
                 if (actuary.getActuaryType() == ActuaryType.AGENT) {
                     BigDecimal current = actuary.getUsedLimit() != null ? actuary.getUsedLimit() : BigDecimal.ZERO;
-                    BigDecimal orderPrice = order.getApproximatePrice() != null ? order.getApproximatePrice() : BigDecimal.ZERO;
-                    actuary.setUsedLimit(current.add(orderPrice));
+                    actuary.setUsedLimit(current.add(limitDelta));
                     actuaryInfoRepository.save(actuary);
                 }
             });
@@ -308,7 +381,7 @@ public class OrderServiceImpl implements OrderService {
     @Override
     @Transactional
     public OrderDto declineOrder(Long orderId) {
-        Order order = orderRepository.findById(orderId)
+        Order order = orderRepository.findByIdForUpdate(orderId)
                 .orElseThrow(() -> new EntityNotFoundException("Order not found " + orderId));
 
         if (order.getStatus() != OrderStatus.PENDING && order.getStatus() != OrderStatus.APPROVED) {
@@ -316,6 +389,33 @@ public class OrderServiceImpl implements OrderService {
         }
 
         String supervisorName = getSupervisorName();
+
+        // Phase 5.2: Ako je order bio APPROVED, treba osloboditi rezervaciju
+        // (novcanu za BUY, kolicinu hartija za SELL) + rollback agent usedLimit.
+        boolean hadReservation = order.getStatus() == OrderStatus.APPROVED;
+        if (hadReservation && !order.isReservationReleased()) {
+            if (order.getDirection() == OrderDirection.BUY) {
+                fundReservationService.releaseForBuy(order);
+            } else if (order.getDirection() == OrderDirection.SELL) {
+                Portfolio portfolio = portfolioRepository
+                        .findByUserIdAndListingIdForUpdate(order.getUserId(), order.getListing().getId())
+                        .orElseThrow(() -> new EntityNotFoundException(
+                                "Portfolio ne postoji za order " + order.getId()));
+                fundReservationService.releaseForSell(order, portfolio);
+            }
+
+            if ("EMPLOYEE".equals(order.getUserRole()) && order.getReservedAmount() != null) {
+                Optional<ActuaryInfo> actuaryOpt = orderStatusService.getAgentInfo(order.getUserId());
+                actuaryOpt.ifPresent(actuary -> {
+                    if (actuary.getActuaryType() == ActuaryType.AGENT) {
+                        BigDecimal current = actuary.getUsedLimit() != null ? actuary.getUsedLimit() : BigDecimal.ZERO;
+                        BigDecimal rolledBack = current.subtract(order.getReservedAmount());
+                        actuary.setUsedLimit(rolledBack.max(BigDecimal.ZERO));
+                        actuaryInfoRepository.save(actuary);
+                    }
+                });
+            }
+        }
 
         order.setStatus(OrderStatus.DECLINED);
         order.setApprovedBy(supervisorName);

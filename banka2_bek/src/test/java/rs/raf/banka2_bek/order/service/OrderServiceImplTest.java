@@ -769,6 +769,11 @@ class OrderServiceImplTest {
             pendingOrder.setListing(listing);
             pendingOrder.setUserId(5L);
             pendingOrder.setUserRole("EMPLOYEE");
+            pendingOrder.setDirection(OrderDirection.BUY);
+            pendingOrder.setOrderType(OrderType.MARKET);
+            pendingOrder.setQuantity(5);
+            pendingOrder.setContractSize(1);
+            pendingOrder.setApproximatePrice(new BigDecimal("755.0000"));
 
             mockSecurityContext("nina@bank.com");
             lenient().when(employeeRepository.findById(10L)).thenReturn(Optional.of(supervisor));
@@ -778,7 +783,7 @@ class OrderServiceImplTest {
         @Test
         @DisplayName("PENDING order se uspesno odobrava")
         void approveOrder_success() {
-            when(orderRepository.findById(1L)).thenReturn(Optional.of(pendingOrder));
+            when(orderRepository.findByIdForUpdate(1L)).thenReturn(Optional.of(pendingOrder));
             when(clientRepository.findByEmail("nina@bank.com")).thenReturn(Optional.empty());
             when(employeeRepository.findByEmail("nina@bank.com")).thenReturn(Optional.of(supervisor));
             when(orderRepository.save(any(Order.class))).thenAnswer(inv -> inv.getArgument(0));
@@ -804,7 +809,7 @@ class OrderServiceImplTest {
         @DisplayName("Order nije PENDING → IllegalStateException")
         void approveOrder_orderNotPending() {
             pendingOrder.setStatus(OrderStatus.APPROVED);
-            when(orderRepository.findById(1L)).thenReturn(Optional.of(pendingOrder));
+            when(orderRepository.findByIdForUpdate(1L)).thenReturn(Optional.of(pendingOrder));
 
             assertThrows(IllegalStateException.class, () -> orderService.approveOrder(1L));
             verify(orderRepository, never()).save(any());
@@ -814,7 +819,7 @@ class OrderServiceImplTest {
         @DisplayName("Order DECLINED → IllegalStateException")
         void approveOrder_orderDeclined() {
             pendingOrder.setStatus(OrderStatus.DECLINED);
-            when(orderRepository.findById(1L)).thenReturn(Optional.of(pendingOrder));
+            when(orderRepository.findByIdForUpdate(1L)).thenReturn(Optional.of(pendingOrder));
 
             assertThrows(IllegalStateException.class, () -> orderService.approveOrder(1L));
             verify(orderRepository, never()).save(any());
@@ -824,7 +829,7 @@ class OrderServiceImplTest {
         @DisplayName("Settlement date prosao → automatski DECLINED")
         void approveOrder_settlementDatePassed_automaticallyDeclines() {
             listing.setSettlementDate(java.time.LocalDate.now().minusDays(1));
-            when(orderRepository.findById(1L)).thenReturn(Optional.of(pendingOrder));
+            when(orderRepository.findByIdForUpdate(1L)).thenReturn(Optional.of(pendingOrder));
             when(clientRepository.findByEmail("nina@bank.com")).thenReturn(Optional.empty());
             when(employeeRepository.findByEmail("nina@bank.com")).thenReturn(Optional.of(supervisor));
             when(orderRepository.save(any(Order.class))).thenAnswer(inv -> inv.getArgument(0));
@@ -840,7 +845,7 @@ class OrderServiceImplTest {
         @DisplayName("Settlement date danas → APPROVED")
         void approveOrder_settlementDateToday_approves() {
             listing.setSettlementDate(java.time.LocalDate.now());
-            when(orderRepository.findById(1L)).thenReturn(Optional.of(pendingOrder));
+            when(orderRepository.findByIdForUpdate(1L)).thenReturn(Optional.of(pendingOrder));
             when(clientRepository.findByEmail("nina@bank.com")).thenReturn(Optional.empty());
             when(employeeRepository.findByEmail("nina@bank.com")).thenReturn(Optional.of(supervisor));
             when(orderRepository.save(any(Order.class))).thenAnswer(inv -> inv.getArgument(0));
@@ -854,7 +859,7 @@ class OrderServiceImplTest {
         @DisplayName("Settlement date u buducnosti → APPROVED")
         void approveOrder_settlementDateFuture_approves() {
             listing.setSettlementDate(java.time.LocalDate.now().plusDays(10));
-            when(orderRepository.findById(1L)).thenReturn(Optional.of(pendingOrder));
+            when(orderRepository.findByIdForUpdate(1L)).thenReturn(Optional.of(pendingOrder));
             when(clientRepository.findByEmail("nina@bank.com")).thenReturn(Optional.empty());
             when(employeeRepository.findByEmail("nina@bank.com")).thenReturn(Optional.of(supervisor));
             when(orderRepository.save(any(Order.class))).thenAnswer(inv -> inv.getArgument(0));
@@ -868,7 +873,7 @@ class OrderServiceImplTest {
         @DisplayName("Nema settlement date (akcije) → APPROVED")
         void approveOrder_noSettlementDate_approves() {
             listing.setSettlementDate(null);
-            when(orderRepository.findById(1L)).thenReturn(Optional.of(pendingOrder));
+            when(orderRepository.findByIdForUpdate(1L)).thenReturn(Optional.of(pendingOrder));
             when(clientRepository.findByEmail("nina@bank.com")).thenReturn(Optional.empty());
             when(employeeRepository.findByEmail("nina@bank.com")).thenReturn(Optional.of(supervisor));
             when(orderRepository.save(any(Order.class))).thenAnswer(inv -> inv.getArgument(0));
@@ -877,6 +882,58 @@ class OrderServiceImplTest {
 
             assertEquals("APPROVED", result.getStatus());
             assertEquals("Nina Nikolic", result.getApprovedBy());
+        }
+
+        @Test
+        @DisplayName("Phase 5.1: PENDING BUY order rezervise sredstva u trenutku odobravanja")
+        void approveOrder_pendingBuy_reservesFundsAtApprovalTime() {
+            when(orderRepository.findByIdForUpdate(1L)).thenReturn(Optional.of(pendingOrder));
+            when(clientRepository.findByEmail("nina@bank.com")).thenReturn(Optional.empty());
+            when(employeeRepository.findByEmail("nina@bank.com")).thenReturn(Optional.of(supervisor));
+            when(orderRepository.save(any(Order.class))).thenAnswer(inv -> inv.getArgument(0));
+
+            OrderDto result = orderService.approveOrder(1L);
+
+            assertEquals("APPROVED", result.getStatus());
+            assertNotNull(pendingOrder.getApprovedAt());
+            assertEquals(testBankUsdAccount.getId(), pendingOrder.getReservedAccountId());
+            assertNotNull(pendingOrder.getReservedAmount());
+            verify(fundReservationService).reserveForBuy(eq(pendingOrder), any(Account.class));
+            verify(fundReservationService, never()).reserveForSell(any(), any());
+            verify(orderRepository).save(any(Order.class));
+        }
+
+        @Test
+        @DisplayName("Phase 5.1: InsufficientFundsException ako availableBalance < totalReservation")
+        void approveOrder_throwsWhenInsufficientFundsAtApprovalTime() {
+            // Ispraznimo bankin racun tako da availableBalance < approximatePrice (755)
+            testBankUsdAccount.setAvailableBalance(new BigDecimal("100.0000"));
+            when(orderRepository.findByIdForUpdate(1L)).thenReturn(Optional.of(pendingOrder));
+            when(clientRepository.findByEmail("nina@bank.com")).thenReturn(Optional.empty());
+            when(employeeRepository.findByEmail("nina@bank.com")).thenReturn(Optional.of(supervisor));
+
+            assertThrows(rs.raf.banka2_bek.order.exception.InsufficientFundsException.class,
+                    () -> orderService.approveOrder(1L));
+
+            verify(fundReservationService, never()).reserveForBuy(any(), any());
+            verify(orderRepository, never()).save(any(Order.class));
+        }
+
+        @Test
+        @DisplayName("Phase 5.1: PENDING SELL order rezervise kolicinu hartija")
+        void approveOrder_pendingSell_reservesPortfolioQuantity() {
+            pendingOrder.setDirection(OrderDirection.SELL);
+            when(orderRepository.findByIdForUpdate(1L)).thenReturn(Optional.of(pendingOrder));
+            when(clientRepository.findByEmail("nina@bank.com")).thenReturn(Optional.empty());
+            when(employeeRepository.findByEmail("nina@bank.com")).thenReturn(Optional.of(supervisor));
+            when(orderRepository.save(any(Order.class))).thenAnswer(inv -> inv.getArgument(0));
+
+            OrderDto result = orderService.approveOrder(1L);
+
+            assertEquals("APPROVED", result.getStatus());
+            assertNotNull(pendingOrder.getApprovedAt());
+            verify(fundReservationService).reserveForSell(eq(pendingOrder), any(Portfolio.class));
+            verify(fundReservationService, never()).reserveForBuy(any(), any());
         }
     }
     @Nested
@@ -907,6 +964,11 @@ class OrderServiceImplTest {
             pendingOrder.setListing(listing);
             pendingOrder.setUserId(5L);
             pendingOrder.setUserRole("EMPLOYEE");
+            pendingOrder.setDirection(OrderDirection.BUY);
+            pendingOrder.setOrderType(OrderType.MARKET);
+            pendingOrder.setQuantity(5);
+            pendingOrder.setContractSize(1);
+            pendingOrder.setApproximatePrice(new BigDecimal("755.0000"));
 
             mockSecurityContext("nina@bank.com");
             lenient().when(employeeRepository.findById(10L)).thenReturn(Optional.of(supervisor));
@@ -915,7 +977,7 @@ class OrderServiceImplTest {
         @Test
         @DisplayName("PENDING order se uspesno odbija")
         void declineOrder_success() {
-            when(orderRepository.findById(1L)).thenReturn(Optional.of(pendingOrder));
+            when(orderRepository.findByIdForUpdate(1L)).thenReturn(Optional.of(pendingOrder));
             when(clientRepository.findByEmail("nina@bank.com")).thenReturn(Optional.empty());
             when(employeeRepository.findByEmail("nina@bank.com")).thenReturn(Optional.of(supervisor));
             when(orderRepository.save(any(Order.class))).thenAnswer(inv -> inv.getArgument(0));
@@ -931,17 +993,17 @@ class OrderServiceImplTest {
         @Test
         @DisplayName("Order ne postoji → EntityNotFoundException")
         void declineOrder_orderNotFound() {
-            when(orderRepository.findById(99L)).thenReturn(Optional.empty());
+            when(orderRepository.findByIdForUpdate(99L)).thenReturn(Optional.empty());
 
             assertThrows(EntityNotFoundException.class, () -> orderService.declineOrder(99L));
             verify(orderRepository, never()).save(any());
         }
 
         @Test
-        @DisplayName("Order nije PENDING → IllegalStateException")
+        @DisplayName("Order nije PENDING ni APPROVED → IllegalStateException")
         void declineOrder_orderNotPending() {
-            pendingOrder.setStatus(OrderStatus.APPROVED);
-            when(orderRepository.findById(1L)).thenReturn(Optional.of(pendingOrder));
+            pendingOrder.setStatus(OrderStatus.DONE);
+            when(orderRepository.findByIdForUpdate(1L)).thenReturn(Optional.of(pendingOrder));
 
             assertThrows(IllegalStateException.class, () -> orderService.declineOrder(1L));
             verify(orderRepository, never()).save(any());
@@ -951,10 +1013,70 @@ class OrderServiceImplTest {
         @DisplayName("Order je vec DECLINED → IllegalStateException")
         void declineOrder_orderAlreadyDeclined() {
             pendingOrder.setStatus(OrderStatus.DECLINED);
-            when(orderRepository.findById(1L)).thenReturn(Optional.of(pendingOrder));
+            when(orderRepository.findByIdForUpdate(1L)).thenReturn(Optional.of(pendingOrder));
 
             assertThrows(IllegalStateException.class, () -> orderService.declineOrder(1L));
             verify(orderRepository, never()).save(any());
+        }
+
+        @Test
+        @DisplayName("Phase 5.2: PENDING decline samo menja status, bez release-a")
+        void declineOrder_pendingOrder_justChangesStatus_noRelease() {
+            when(orderRepository.findByIdForUpdate(1L)).thenReturn(Optional.of(pendingOrder));
+            when(clientRepository.findByEmail("nina@bank.com")).thenReturn(Optional.empty());
+            when(employeeRepository.findByEmail("nina@bank.com")).thenReturn(Optional.of(supervisor));
+            when(orderRepository.save(any(Order.class))).thenAnswer(inv -> inv.getArgument(0));
+
+            OrderDto result = orderService.declineOrder(1L);
+
+            assertEquals("DECLINED", result.getStatus());
+            verify(fundReservationService, never()).releaseForBuy(any());
+            verify(fundReservationService, never()).releaseForSell(any(), any());
+        }
+
+        @Test
+        @DisplayName("Phase 5.2: APPROVED BUY decline oslobadja rezervaciju + agent usedLimit rollback")
+        void declineOrder_approvedBuy_releasesFundReservation() {
+            pendingOrder.setStatus(OrderStatus.APPROVED);
+            pendingOrder.setReservedAccountId(testBankUsdAccount.getId());
+            pendingOrder.setReservedAmount(new BigDecimal("755.0000"));
+
+            ActuaryInfo actuary = new ActuaryInfo();
+            actuary.setActuaryType(ActuaryType.AGENT);
+            actuary.setUsedLimit(new BigDecimal("1000.0000"));
+
+            when(orderRepository.findByIdForUpdate(1L)).thenReturn(Optional.of(pendingOrder));
+            when(clientRepository.findByEmail("nina@bank.com")).thenReturn(Optional.empty());
+            when(employeeRepository.findByEmail("nina@bank.com")).thenReturn(Optional.of(supervisor));
+            when(orderRepository.save(any(Order.class))).thenAnswer(inv -> inv.getArgument(0));
+            when(orderStatusService.getAgentInfo(5L)).thenReturn(Optional.of(actuary));
+
+            OrderDto result = orderService.declineOrder(1L);
+
+            assertEquals("DECLINED", result.getStatus());
+            verify(fundReservationService).releaseForBuy(pendingOrder);
+            verify(fundReservationService, never()).releaseForSell(any(), any());
+            // usedLimit se smanjio: 1000 - 755 = 245
+            assertEquals(0, actuary.getUsedLimit().compareTo(new BigDecimal("245.0000")));
+            verify(actuaryInfoRepository).save(actuary);
+        }
+
+        @Test
+        @DisplayName("Phase 5.2: APPROVED SELL decline oslobadja rezervaciju hartija")
+        void declineOrder_approvedSell_releasesPortfolioReservation() {
+            pendingOrder.setStatus(OrderStatus.APPROVED);
+            pendingOrder.setDirection(OrderDirection.SELL);
+
+            when(orderRepository.findByIdForUpdate(1L)).thenReturn(Optional.of(pendingOrder));
+            when(clientRepository.findByEmail("nina@bank.com")).thenReturn(Optional.empty());
+            when(employeeRepository.findByEmail("nina@bank.com")).thenReturn(Optional.of(supervisor));
+            when(orderRepository.save(any(Order.class))).thenAnswer(inv -> inv.getArgument(0));
+
+            OrderDto result = orderService.declineOrder(1L);
+
+            assertEquals("DECLINED", result.getStatus());
+            verify(fundReservationService).releaseForSell(eq(pendingOrder), any(Portfolio.class));
+            verify(fundReservationService, never()).releaseForBuy(any());
         }
     }
 
