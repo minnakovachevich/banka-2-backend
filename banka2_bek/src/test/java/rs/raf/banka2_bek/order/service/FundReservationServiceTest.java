@@ -616,4 +616,15 @@ class FundReservationServiceTest {
         assertThat(p.getReservedQuantity()).isEqualTo(0);
         verify(portfolioRepository).save(p);
     }
+
+    @Test
+    void currentReservedOnOrder_returnsZeroWhenTotalNull_viaReflection() throws Exception {
+        Account account = buyAccount(new BigDecimal("10000"), new BigDecimal("10000"), BigDecimal.ZERO);
+        Order order = new Order();
+        order.setReservedAmount(null); // forsiramo L203 null branch
+        var method = FundReservationService.class.getDeclaredMethod("currentReservedOnOrder", Account.class, Order.class);
+        method.setAccessible(true);
+        BigDecimal result = (BigDecimal) method.invoke(service, account, order);
+        assertThat(result).isEqualByComparingTo(BigDecimal.ZERO);
+    }
 }

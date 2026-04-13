@@ -619,4 +619,111 @@ class OrderExecutionServiceCoverageTest {
 
         verify(fundReservationService, never()).consumeForSellFill(any(), any(), anyInt());
     }
+
+    // ── 25. remainingPortions = 0 → early DONE return (L175-181) ─────────────
+    @Test
+    @DisplayName("executeSingleOrder: remainingPortions=0 → DONE + release + save")
+    void remainingZero_earlyDone() {
+        Order o = baseOrder();
+        o.setAllOrNone(false);
+        o.setRemainingPortions(0); // trigger early-return branch
+
+        when(orderRepository.findByStatusAndIsDoneFalse(OrderStatus.APPROVED)).thenReturn(List.of(o));
+        when(listingRepository.findById(10L)).thenReturn(Optional.of(listing));
+
+        service.executeOrders();
+
+        assertThat(o.isDone()).isTrue();
+        assertThat(o.getStatus()).isEqualTo(OrderStatus.DONE);
+        verify(fundReservationService, never()).consumeForBuyFill(any(), anyInt(), any());
+        verify(orderRepository).save(o);
+        // release was called (BUY branch) via releaseReservationSafe
+        verify(fundReservationService).releaseForBuy(o);
+    }
+
+    // ── 26. SELL: receiving account not found → RuntimeException caught ──────
+    @Test
+    @DisplayName("SELL: receivingAccount not found → exception caught (L232)")
+    void sell_receivingAccountMissing_exceptionCaught() {
+        Order o = baseOrder();
+        o.setDirection(OrderDirection.SELL);
+
+        Portfolio p = new Portfolio();
+        p.setId(5L);
+        p.setUserId(42L);
+        p.setListingId(10L);
+        p.setQuantity(50);
+        p.setReservedQuantity(10);
+        p.setAverageBuyPrice(new BigDecimal("80.00"));
+
+        when(orderRepository.findByStatusAndIsDoneFalse(OrderStatus.APPROVED)).thenReturn(List.of(o));
+        when(listingRepository.findById(10L)).thenReturn(Optional.of(listing));
+        when(aonValidationService.checkCanExecuteAon(any(), anyInt())).thenReturn(true);
+        when(portfolioRepository.findByUserId(42L)).thenReturn(new ArrayList<>(List.of(p)));
+        when(accountRepository.findForUpdateById(1L)).thenReturn(Optional.empty());
+
+        service.executeOrders();
+
+        // exception is caught in outer try; order remains unchanged
+        assertThat(o.isDone()).isFalse();
+    }
+
+    // ── 26b. settlementDate exists but in the FUTURE → executes normally (L98 branch) ──
+    @Test
+    @DisplayName("settlementDate u buducnosti → ne auto-decline, izvrsava normalno")
+    void settlementDate_inFuture_executesNormally() {
+        listing.setSettlementDate(LocalDate.now().plusDays(30));
+        Order o = baseOrder();
+
+        when(orderRepository.findByStatusAndIsDoneFalse(OrderStatus.APPROVED)).thenReturn(List.of(o));
+        when(listingRepository.findById(10L)).thenReturn(Optional.of(listing));
+        when(aonValidationService.checkCanExecuteAon(any(), anyInt())).thenReturn(true);
+        when(accountRepository.findById(1L)).thenReturn(Optional.of(userAccount));
+        when(accountRepository.findBankAccountByCurrencyId(any(), any())).thenReturn(Optional.of(bankAccount));
+        when(portfolioRepository.findByUserId(42L)).thenReturn(new ArrayList<>());
+
+        service.executeOrders();
+
+        assertThat(o.getStatus()).isNotEqualTo(OrderStatus.DECLINED);
+        verify(fundReservationService).consumeForBuyFill(eq(o), eq(10), any(BigDecimal.class));
+    }
+
+    // ── 26c. user account not found in creditBankCommission (L299) ────────────
+    @Test
+    @DisplayName("creditBankCommission: user account not found → RuntimeException caught")
+    void creditBankCommission_userAccountNotFound_caught() {
+        Order o = baseOrder();
+
+        when(orderRepository.findByStatusAndIsDoneFalse(OrderStatus.APPROVED)).thenReturn(List.of(o));
+        when(listingRepository.findById(10L)).thenReturn(Optional.of(listing));
+        when(aonValidationService.checkCanExecuteAon(any(), anyInt())).thenReturn(true);
+        // findById returns empty → triggers orElseThrow at L299
+        when(accountRepository.findById(1L)).thenReturn(Optional.empty());
+
+        // exception propagates out of creditBankCommission, caught in outer try/catch
+        service.executeOrders();
+
+        // commission routing failed; ensure no bank account lookup happened
+        verify(accountRepository, never()).findBankAccountByCurrencyId(any(), any());
+    }
+
+    // ── 27. Auto-decline SELL: release path with portfolio null (L276-279) ───
+    @Test
+    @DisplayName("Auto-decline SELL: portfolio null u releaseReservationSafe → setReservationReleased")
+    void autoDeclineSell_noPortfolio_setsReleasedFlag() {
+        listing.setSettlementDate(LocalDate.now().minusDays(1));
+        Order o = baseOrder();
+        o.setDirection(OrderDirection.SELL);
+        o.setReservationReleased(false);
+
+        when(orderRepository.findByStatusAndIsDoneFalse(OrderStatus.APPROVED)).thenReturn(List.of(o));
+        // portfolio list empty → releaseReservationSafe SELL branch hits portfolio==null path
+        when(portfolioRepository.findByUserId(42L)).thenReturn(new ArrayList<>());
+
+        service.executeOrders();
+
+        assertThat(o.getStatus()).isEqualTo(OrderStatus.DECLINED);
+        assertThat(o.isReservationReleased()).isTrue();
+        verify(fundReservationService, never()).releaseForSell(any(), any());
+    }
 }

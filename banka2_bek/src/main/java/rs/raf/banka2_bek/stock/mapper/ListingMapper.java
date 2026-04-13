@@ -85,19 +85,15 @@ public final class ListingMapper {
         BigDecimal price = listing.getPrice();
         if (price == null || listing.getListingType() == null) return null;
 
-        switch (listing.getListingType()) {
-            case STOCK:
-                return price.multiply(BigDecimal.valueOf(0.5))
-                        .setScale(4, RoundingMode.HALF_UP);
-            case FOREX:
-            case FUTURES:
-                int cs = listing.getContractSize() != null ? listing.getContractSize() : 1;
-                return BigDecimal.valueOf(cs).multiply(price)
-                        .multiply(BigDecimal.valueOf(0.1))
-                        .setScale(4, RoundingMode.HALF_UP);
-            default:
-                return null;
+        if (listing.getListingType() == rs.raf.banka2_bek.stock.model.ListingType.STOCK) {
+            return price.multiply(BigDecimal.valueOf(0.5))
+                    .setScale(4, RoundingMode.HALF_UP);
         }
+        // FOREX or FUTURES
+        int cs = listing.getContractSize() != null ? listing.getContractSize() : 1;
+        return BigDecimal.valueOf(cs).multiply(price)
+                .multiply(BigDecimal.valueOf(0.1))
+                .setScale(4, RoundingMode.HALF_UP);
     }
 
     /**

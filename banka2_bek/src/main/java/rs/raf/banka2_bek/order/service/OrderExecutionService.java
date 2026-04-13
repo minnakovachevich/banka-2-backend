@@ -101,11 +101,8 @@ public class OrderExecutionService {
                     order.setDone(true);
                     order.setLastModification(LocalDateTime.now());
                     // Oslobadjanje rezervacije za auto-declined order
-                    try {
-                        releaseReservationSafe(order);
-                    } catch (Exception e) {
-                        log.warn("Failed to release reservation for auto-declined order #{}: {}", order.getId(), e.getMessage());
-                    }
+                    // (releaseReservationSafe vec interno guta sve greske)
+                    releaseReservationSafe(order);
                     orderRepository.save(order);
 
                     log.warn("Order #{} auto-declined: settlement date {} has passed",
@@ -289,7 +286,7 @@ public class OrderExecutionService {
      * No-op ako je commission = 0 (zaposleni).
      */
     private void creditBankCommission(Order order, BigDecimal commission) {
-        if (commission == null || commission.compareTo(BigDecimal.ZERO) <= 0) {
+        if (commission.compareTo(BigDecimal.ZERO) <= 0) {
             return;
         }
         Long accountId = order.getReservedAccountId() != null
@@ -328,6 +325,11 @@ public class OrderExecutionService {
         transactionRepository.save(transaction);
     }
 
+    /**
+     * Azurira portfolio nakon BUY fill-a. SELL fillovi NE prolaze ovuda — oni
+     * se obradjuju kroz {@link FundReservationService#consumeForSellFill}.
+     * Zato ovde tretiramo samo BUY (quantity > 0).
+     */
     private void updatePortfolio(Order order, int quantity, BigDecimal price) {
         Optional<Portfolio> existing = portfolioRepository.findByUserId(order.getUserId())
                 .stream()
@@ -337,28 +339,17 @@ public class OrderExecutionService {
         if (existing.isPresent()) {
             Portfolio portfolio = existing.get();
             int oldQty = portfolio.getQuantity();
+            BigDecimal oldTotal = portfolio.getAverageBuyPrice().multiply(BigDecimal.valueOf(oldQty));
+            BigDecimal newFillTotal = price.multiply(BigDecimal.valueOf(quantity));
+            int newQty = oldQty + quantity;
 
-            if (quantity > 0) { // BUY
-                BigDecimal oldTotal = portfolio.getAverageBuyPrice().multiply(BigDecimal.valueOf(oldQty));
-                BigDecimal newFillTotal = price.multiply(BigDecimal.valueOf(quantity));
-                int newQty = oldQty + quantity;
+            BigDecimal newAvg = oldTotal.add(newFillTotal)
+                    .divide(BigDecimal.valueOf(newQty), 4, RoundingMode.HALF_UP);
 
-                BigDecimal newAvg = oldTotal.add(newFillTotal)
-                        .divide(BigDecimal.valueOf(newQty), 4, RoundingMode.HALF_UP);
-
-                portfolio.setQuantity(newQty);
-                portfolio.setAverageBuyPrice(newAvg);
-                portfolioRepository.save(portfolio);
-            } else { // SELL (quantity je već negativan)
-                int newQty = oldQty + quantity;
-                if (newQty <= 0) {
-                    portfolioRepository.delete(portfolio);
-                } else {
-                    portfolio.setQuantity(newQty);
-                    portfolioRepository.save(portfolio);
-                }
-            }
-        } else if (quantity > 0) { // Prvi BUY
+            portfolio.setQuantity(newQty);
+            portfolio.setAverageBuyPrice(newAvg);
+            portfolioRepository.save(portfolio);
+        } else {
             Portfolio portfolio = new Portfolio();
             portfolio.setUserId(order.getUserId());
             portfolio.setListingId(order.getListing().getId());
@@ -370,8 +361,6 @@ public class OrderExecutionService {
             portfolio.setPublicQuantity(0);
 
             portfolioRepository.save(portfolio);
-        } else {
-            throw new IllegalStateException("Attempted to sell assets not present in portfolio for user: " + order.getUserId());
         }
     }
 

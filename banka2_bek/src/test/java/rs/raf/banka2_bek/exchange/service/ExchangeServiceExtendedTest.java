@@ -707,6 +707,31 @@ class ExchangeServiceExtendedTest {
         }
     }
 
+    // ===== Double-checked cache hit =====
+
+    @Nested
+    @DisplayName("Double-checked locking cache hit")
+    class DoubleCheckedCache {
+
+        @Test
+        @DisplayName("fetchAndCacheRates returns cached when called directly with fresh cache (DCL inner branch)")
+        void fetchAndCacheRates_returnsCached_whenInnerCheckHits() throws Exception {
+            List<ExchangeRateDto> cached = List.of(
+                    new ExchangeRateDto("EUR", 117.0)
+            );
+            ReflectionTestUtils.setField(exchangeService, "cachedRates", cached);
+            ReflectionTestUtils.setField(exchangeService, "cacheTimestamp", System.currentTimeMillis());
+
+            java.lang.reflect.Method m = ExchangeService.class.getDeclaredMethod("fetchAndCacheRates");
+            m.setAccessible(true);
+            @SuppressWarnings("unchecked")
+            List<ExchangeRateDto> result = (List<ExchangeRateDto>) m.invoke(exchangeService);
+
+            assertThat(result).isSameAs(cached);
+            verifyNoInteractions(restTemplate);
+        }
+    }
+
     // ===== Empty rates map =====
 
     @Nested

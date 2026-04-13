@@ -121,7 +121,8 @@ public class OrderServiceImpl implements OrderService {
 
         BigDecimal exchangeRate = null;
         BigDecimal totalReservation = null;
-        if (direction == OrderDirection.BUY && account != null) {
+        // account je uvek non-null nakon if/else iznad — guard zadrzan iz citljivosti uklonjen
+        if (direction == OrderDirection.BUY) {
             String accountCurrencyCode = account.getCurrency().getCode();
             exchangeRate = currencyConversionService.getRate(listingCurrencyCode, accountCurrencyCode);
             BigDecimal approxInAccountCurrency = currencyConversionService.convert(
@@ -138,7 +139,7 @@ public class OrderServiceImpl implements OrderService {
             }
             totalReservation = approxInAccountCurrency.add(commissionInAccountCurrency)
                     .setScale(4, RoundingMode.HALF_UP);
-        } else if (direction == OrderDirection.SELL && account != null) {
+        } else { // SELL
             // Za SELL ne rezervisemo novac; ipak sacuvamo kurs listing→receiving account
             // kako bi fill engine znao u kojoj valuti da prihoduje pare na receiving racun.
             String accountCurrencyCode = account.getCurrency().getCode();
@@ -148,7 +149,7 @@ public class OrderServiceImpl implements OrderService {
         // Step 6: Verify funds / holdings
         //   BUY: availableBalance >= totalReservation
         //   SELL: portfolio.availableQuantity >= dto.quantity (provereno iznad pri portfolio lookup-u)
-        if (direction == OrderDirection.BUY && account != null && totalReservation != null) {
+        if (direction == OrderDirection.BUY) {
             if (account.getAvailableBalance().compareTo(totalReservation) < 0) {
                 throw new InsufficientFundsException(
                         "Nedovoljno raspolozivih sredstava na racunu " + account.getAccountNumber());
@@ -173,7 +174,7 @@ public class OrderServiceImpl implements OrderService {
         order.setApprovedBy(approvedBy);
         order.setAfterHours(afterHours);
 
-        if (direction == OrderDirection.BUY && account != null) {
+        if (direction == OrderDirection.BUY) {
             order.setReservedAccountId(account.getId());
             order.setReservedAmount(totalReservation);
             order.setExchangeRate(exchangeRate);
@@ -181,7 +182,7 @@ public class OrderServiceImpl implements OrderService {
             if (isEmployee) {
                 order.setAccountId(account.getId());
             }
-        } else if (direction == OrderDirection.SELL && account != null) {
+        } else { // SELL
             // Za SELL "reservedAccountId" drzi receiving account (kuda idu pare po fill-u).
             // reservedAmount ostaje null — nema novcane rezervacije.
             order.setReservedAccountId(account.getId());
@@ -198,10 +199,12 @@ public class OrderServiceImpl implements OrderService {
         Order savedOrder = orderRepository.save(order);
 
         // Step 10: Rezervacija (sredstva za BUY, kolicina hartija za SELL) za APPROVED ordere
-        if (status == OrderStatus.APPROVED && direction == OrderDirection.BUY && account != null) {
-            fundReservationService.reserveForBuy(savedOrder, account);
-        } else if (status == OrderStatus.APPROVED && direction == OrderDirection.SELL && portfolio != null) {
-            fundReservationService.reserveForSell(savedOrder, portfolio);
+        if (status == OrderStatus.APPROVED) {
+            if (direction == OrderDirection.BUY) {
+                fundReservationService.reserveForBuy(savedOrder, account);
+            } else { // SELL — portfolio je uvek non-null nakon SELL grane iznad
+                fundReservationService.reserveForSell(savedOrder, portfolio);
+            }
         }
 
         // Step 11: Update agent usedLimit if APPROVED
@@ -338,7 +341,8 @@ public class OrderServiceImpl implements OrderService {
                 order.setAccountId(account.getId());
             }
             fundReservationService.reserveForBuy(order, account);
-        } else if (order.getDirection() == OrderDirection.SELL) {
+        } else { // SELL
+
             Portfolio portfolio = portfolioRepository
                     .findByUserIdAndListingIdForUpdate(order.getUserId(), listing.getId())
                     .orElseThrow(() -> new InsufficientHoldingsException(
@@ -396,7 +400,7 @@ public class OrderServiceImpl implements OrderService {
         if (hadReservation && !order.isReservationReleased()) {
             if (order.getDirection() == OrderDirection.BUY) {
                 fundReservationService.releaseForBuy(order);
-            } else if (order.getDirection() == OrderDirection.SELL) {
+            } else { // SELL
                 Portfolio portfolio = portfolioRepository
                         .findByUserIdAndListingIdForUpdate(order.getUserId(), order.getListing().getId())
                         .orElseThrow(() -> new EntityNotFoundException(

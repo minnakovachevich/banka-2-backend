@@ -297,5 +297,34 @@ class FundsVerificationServiceTest {
                     service.verify(dto, 1L, new BigDecimal("0"), futuresListing(new BigDecimal("100"), 10), OrderType.MARKET, OrderDirection.BUY));
             assertEquals("Insufficient funds for margin order", ex.getMessage());
         }
+
+        @Test
+        @DisplayName("Account not found — IllegalArgumentException sa porukom 'Account not found'")
+        void accountNotFound_throws() {
+            CreateOrderDto dto = buyDto(99L);
+            when(accountRepository.findById(99L)).thenReturn(Optional.empty());
+
+            IllegalArgumentException ex = assertThrows(IllegalArgumentException.class, () ->
+                    service.verify(dto, 1L, new BigDecimal("100"), stockListing(new BigDecimal("10")), OrderType.MARKET, OrderDirection.BUY));
+            assertEquals("Account not found", ex.getMessage());
+        }
+
+        @Test
+        @DisplayName("FUTURES margin — null contractSize default 1 (L57 grana)")
+        void futuresMargin_nullContractSize_defaultsToOne() {
+            CreateOrderDto dto = buyDto(1L);
+            dto.setMargin(true);
+            Listing l = new Listing();
+            l.setId(1L);
+            l.setListingType(ListingType.FUTURES);
+            l.setPrice(new BigDecimal("100"));
+            l.setContractSize(null);
+            // maintenance = 1 * 100 * 0.1 = 10, initial = 11
+            Account acc = accountWithBalance(new BigDecimal("1000"), new BigDecimal("1000"));
+            when(accountRepository.findById(1L)).thenReturn(Optional.of(acc));
+
+            assertDoesNotThrow(() ->
+                    service.verify(dto, 1L, new BigDecimal("0"), l, OrderType.MARKET, OrderDirection.BUY));
+        }
     }
 }

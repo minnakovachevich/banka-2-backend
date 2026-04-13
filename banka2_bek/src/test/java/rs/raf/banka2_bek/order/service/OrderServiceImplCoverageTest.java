@@ -40,6 +40,8 @@ import rs.raf.banka2_bek.portfolio.repository.PortfolioRepository;
 import rs.raf.banka2_bek.stock.model.Listing;
 import rs.raf.banka2_bek.stock.model.ListingType;
 import rs.raf.banka2_bek.stock.repository.ListingRepository;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageImpl;
 
 import java.math.BigDecimal;
 import java.util.List;
@@ -622,5 +624,355 @@ class OrderServiceImplCoverageTest {
         OrderDto result = orderService.getOrderById(10L);
 
         assertThat(result).isNotNull();
+    }
+
+    // ── getOrderById: ROLE_EMPLOYEE granu (L468 druga strana OR-a) ──────────
+    @Test
+    @DisplayName("getOrderById — korisnik sa ROLE_EMPLOYEE takodje moze da vidi tudji order")
+    void getOrderByIdRoleEmployeeSeesOthers() {
+        authEmployee("agent@test.com", "ROLE_EMPLOYEE");
+        Order o = new Order();
+        o.setId(11L);
+        o.setUserId(7777L);
+        o.setUserRole("CLIENT");
+        o.setListing(listing(ListingType.STOCK, "NASDAQ"));
+        o.setDirection(OrderDirection.BUY);
+        o.setStatus(OrderStatus.APPROVED);
+
+        when(orderRepository.findById(11L)).thenReturn(Optional.of(o));
+
+        OrderDto result = orderService.getOrderById(11L);
+
+        assertThat(result).isNotNull();
+    }
+
+    // ── getOrderById: klijent gleda svoj order (isSupervisor=false, self) ────
+    @Test
+    @DisplayName("getOrderById — klijent gleda svoj order (isSupervisor=false)")
+    void getOrderByIdClientSelf() {
+        authClient("client@test.com");
+        Order o = new Order();
+        o.setId(12L);
+        o.setUserId(42L); // isti kao testClient
+        o.setUserRole("CLIENT");
+        o.setListing(listing(ListingType.STOCK, "NASDAQ"));
+        o.setDirection(OrderDirection.BUY);
+        o.setStatus(OrderStatus.APPROVED);
+
+        when(orderRepository.findById(12L)).thenReturn(Optional.of(o));
+
+        OrderDto result = orderService.getOrderById(12L);
+
+        assertThat(result).isNotNull();
+    }
+
+    // ── getOrderById: klijent pokusava tudji order → exception ──────────────
+    @Test
+    @DisplayName("getOrderById — klijent pokusava tudji order → IllegalStateException")
+    void getOrderByIdClientForeign_throws() {
+        authClient("client@test.com");
+        Order o = new Order();
+        o.setId(13L);
+        o.setUserId(8888L); // nije testClient
+        o.setUserRole("CLIENT");
+        o.setListing(listing(ListingType.STOCK, "NASDAQ"));
+        o.setDirection(OrderDirection.BUY);
+        o.setStatus(OrderStatus.APPROVED);
+
+        when(orderRepository.findById(13L)).thenReturn(Optional.of(o));
+
+        assertThatThrownBy(() -> orderService.getOrderById(13L))
+                .isInstanceOf(IllegalStateException.class);
+    }
+
+    // ── getAllOrders: blank string granu ─────────────────────────────────────
+    @Test
+    @DisplayName("getAllOrders — blank string tretira se kao ALL")
+    void getAllOrders_blankString_treatedAsAll() {
+        Page<Order> empty = new PageImpl<>(List.of());
+        when(orderRepository.findAll(any(org.springframework.data.domain.Pageable.class))).thenReturn(empty);
+
+        Page<OrderDto> result = orderService.getAllOrders("   ", 0, 20);
+
+        assertThat(result).isNotNull();
+        verify(orderRepository).findAll(any(org.springframework.data.domain.Pageable.class));
+    }
+
+    // ── approveOrder SELL: portfolio ne postoji → InsufficientHoldings ───────
+    @Test
+    @DisplayName("approveOrder — SELL portfolio ne postoji → InsufficientHoldings (L344-345)")
+    void approveSellPortfolioMissing() {
+        authEmployee("agent@test.com", "ROLE_ADMIN");
+        Listing l = listing(ListingType.STOCK, "NASDAQ");
+        Order o = pendingClientBuy(l);
+        o.setDirection(OrderDirection.SELL);
+
+        when(orderRepository.findByIdForUpdate(1L)).thenReturn(Optional.of(o));
+        when(portfolioRepository.findByUserIdAndListingIdForUpdate(42L, 1L))
+                .thenReturn(Optional.empty());
+
+        assertThatThrownBy(() -> orderService.approveOrder(1L))
+                .isInstanceOf(InsufficientHoldingsException.class)
+                .hasMessageContaining("Nemate ovu hartiju");
+    }
+
+    // ── approveOrder SELL: uspesan slucaj → fundReservationService.reserveForSell ─
+    @Test
+    @DisplayName("approveOrder — SELL uspesan (L341 true branch + reserveForSell)")
+    void approveSellSuccess() {
+        authEmployee("agent@test.com", "ROLE_ADMIN");
+        Listing l = listing(ListingType.STOCK, "NASDAQ");
+        Order o = pendingClientBuy(l);
+        o.setDirection(OrderDirection.SELL);
+        o.setQuantity(5); // portfolio ima 30
+
+        when(orderRepository.findByIdForUpdate(1L)).thenReturn(Optional.of(o));
+        when(portfolioRepository.findByUserIdAndListingIdForUpdate(42L, 1L))
+                .thenReturn(Optional.of(testPortfolio));
+        when(orderRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+
+        OrderDto result = orderService.approveOrder(1L);
+
+        assertThat(result.getStatus()).isEqualTo("APPROVED");
+        verify(fundReservationService).reserveForSell(any(), any());
+    }
+
+    // ── approveOrder: EMPLOYEE SELL → limit delta fallback na approximatePrice ─
+    @Test
+    @DisplayName("approveOrder — EMPLOYEE SELL koristi approximatePrice za limit delta (L367)")
+    void approveEmployeeSellUsesApproxPriceForLimit() {
+        authEmployee("agent@test.com", "ROLE_ADMIN");
+        Listing l = listing(ListingType.STOCK, "NASDAQ");
+        Order o = pendingClientBuy(l);
+        o.setDirection(OrderDirection.SELL);
+        o.setUserRole("EMPLOYEE");
+        o.setUserId(99L);
+        o.setQuantity(5);
+
+        ActuaryInfo info = new ActuaryInfo();
+        info.setActuaryType(ActuaryType.AGENT);
+        info.setUsedLimit(new BigDecimal("100"));
+
+        when(orderRepository.findByIdForUpdate(1L)).thenReturn(Optional.of(o));
+        when(portfolioRepository.findByUserIdAndListingIdForUpdate(42L, 1L))
+                .thenReturn(Optional.of(testPortfolio));
+        when(orderStatusService.getAgentInfo(99L)).thenReturn(Optional.of(info));
+        when(orderRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+
+        orderService.approveOrder(1L);
+
+        // limit = 100 + approxPrice(755) = 855
+        assertThat(info.getUsedLimit()).isEqualByComparingTo("855");
+    }
+
+    // ── approveOrder: EMPLOYEE SELL sa approximatePrice null → ZERO fallback ─
+    @Test
+    @DisplayName("approveOrder — EMPLOYEE SELL approximatePrice null → ZERO delta")
+    void approveEmployeeSellNullApproxPrice() {
+        authEmployee("agent@test.com", "ROLE_ADMIN");
+        Listing l = listing(ListingType.STOCK, "NASDAQ");
+        Order o = pendingClientBuy(l);
+        o.setDirection(OrderDirection.SELL);
+        o.setUserRole("EMPLOYEE");
+        o.setUserId(99L);
+        o.setQuantity(5);
+        o.setApproximatePrice(null);
+
+        ActuaryInfo info = new ActuaryInfo();
+        info.setActuaryType(ActuaryType.AGENT);
+        info.setUsedLimit(new BigDecimal("100"));
+
+        when(orderRepository.findByIdForUpdate(1L)).thenReturn(Optional.of(o));
+        when(portfolioRepository.findByUserIdAndListingIdForUpdate(42L, 1L))
+                .thenReturn(Optional.of(testPortfolio));
+        when(orderStatusService.getAgentInfo(99L)).thenReturn(Optional.of(info));
+        when(orderRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+
+        orderService.approveOrder(1L);
+
+        // delta = ZERO → limit ostaje 100
+        assertThat(info.getUsedLimit()).isEqualByComparingTo("100");
+    }
+
+    // ── createOrder: insufficient funds BUY (L151-155) ───────────────────────
+    @Test
+    @DisplayName("createOrder — BUY nedovoljno sredstava → InsufficientFundsException")
+    void createBuyInsufficientFunds() {
+        authClient("client@test.com");
+        when(listingRepository.findById(1L)).thenReturn(Optional.of(listing(ListingType.STOCK, "NASDAQ")));
+        when(listingPriceService.getPricePerUnit(any(), any(), any(), any())).thenReturn(new BigDecimal("151"));
+        when(listingPriceService.calculateApproximatePrice(anyInt(), any(), anyInt()))
+                .thenReturn(new BigDecimal("999999999")); // vise nego availableBalance
+        when(orderStatusService.determineStatus(anyString(), anyLong(), any())).thenReturn(OrderStatus.PENDING);
+
+        assertThatThrownBy(() -> orderService.createOrder(dtoMarketBuy()))
+                .isInstanceOf(rs.raf.banka2_bek.order.exception.InsufficientFundsException.class);
+    }
+
+    // ── createOrder BUY: account ne postoji → EntityNotFoundException (L100) ──
+    @Test
+    @DisplayName("createOrder CLIENT BUY: nepostojeci account → EntityNotFoundException")
+    void createBuy_accountMissing_throwsNotFound() {
+        authClient("client@test.com");
+        when(listingRepository.findById(1L)).thenReturn(Optional.of(listing(ListingType.STOCK, "NASDAQ")));
+        when(listingPriceService.getPricePerUnit(any(), any(), any(), any())).thenReturn(new BigDecimal("151"));
+        when(listingPriceService.calculateApproximatePrice(anyInt(), any(), anyInt()))
+                .thenReturn(new BigDecimal("755"));
+        when(accountRepository.findForUpdateById(100L)).thenReturn(Optional.empty());
+
+        assertThatThrownBy(() -> orderService.createOrder(dtoMarketBuy()))
+                .isInstanceOf(EntityNotFoundException.class)
+                .hasMessageContaining("Racun ne postoji");
+    }
+
+    // ── createOrder SELL: account ne postoji → EntityNotFoundException (L108) ──
+    @Test
+    @DisplayName("createOrder CLIENT SELL: nepostojeci account → EntityNotFoundException")
+    void createSell_accountMissing_throwsNotFound() {
+        authClient("client@test.com");
+        when(orderValidationService.parseDirection(anyString())).thenReturn(OrderDirection.SELL);
+        when(listingRepository.findById(1L)).thenReturn(Optional.of(listing(ListingType.STOCK, "NASDAQ")));
+        when(listingPriceService.getPricePerUnit(any(), any(), any(), any())).thenReturn(new BigDecimal("149"));
+        when(listingPriceService.calculateApproximatePrice(anyInt(), any(), anyInt()))
+                .thenReturn(new BigDecimal("745"));
+        when(accountRepository.findForUpdateById(100L)).thenReturn(Optional.empty());
+
+        CreateOrderDto sellDto = dtoMarketBuy();
+        sellDto.setDirection("SELL");
+
+        assertThatThrownBy(() -> orderService.createOrder(sellDto))
+                .isInstanceOf(EntityNotFoundException.class)
+                .hasMessageContaining("Racun ne postoji");
+    }
+
+    // ── approveOrder: supervisor email nepronadjen → IllegalStateException (L513) ──
+    @Test
+    @DisplayName("approveOrder: supervisor not found in employee repo → IllegalStateException")
+    void approveOrder_supervisorNotFound_throws() {
+        // Authenticate as a supervisor email koji nije u employeeRepo
+        // resolveCurrentUser uses email->employee for EMPLOYEE auth, but getSupervisorName
+        // calls employeeRepository.findById — mockujemo email lookup da vrati testEmployee
+        // ali findById da vrati empty da bismo pogodili orElseThrow.
+        SecurityContextHolder.getContext().setAuthentication(
+                new UsernamePasswordAuthenticationToken("agent@test.com", null,
+                        List.of(new SimpleGrantedAuthority("ROLE_ADMIN"))));
+        lenient().when(clientRepository.findByEmail("agent@test.com")).thenReturn(Optional.empty());
+        lenient().when(employeeRepository.findByEmail("agent@test.com")).thenReturn(Optional.of(testEmployee));
+        lenient().when(employeeRepository.findById(99L)).thenReturn(Optional.empty()); // override BeforeEach? no — set explicitly
+        when(employeeRepository.findById(99L)).thenReturn(Optional.empty());
+
+        Order pending = new Order();
+        pending.setId(77L);
+        pending.setStatus(OrderStatus.PENDING);
+        pending.setDirection(OrderDirection.BUY);
+        pending.setListing(listing(ListingType.STOCK, "NASDAQ"));
+        pending.setUserRole("CLIENT");
+        pending.setUserId(42L);
+        pending.setApproximatePrice(new BigDecimal("100"));
+        pending.setAccountId(100L);
+
+        when(orderRepository.findByIdForUpdate(77L)).thenReturn(Optional.of(pending));
+
+        assertThatThrownBy(() -> orderService.approveOrder(77L))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Supervisor not found");
+    }
+
+    // ── approveOrder: agent sa usedLimit == null (L373/L414 ternary branch) ──
+    @Test
+    @DisplayName("approveOrder: agent sa usedLimit=null → koristi BigDecimal.ZERO")
+    void approveOrder_agentNullUsedLimit_usesZero() {
+        authEmployee("agent@test.com", "ROLE_ADMIN");
+
+        Order pending = new Order();
+        pending.setId(88L);
+        pending.setStatus(OrderStatus.PENDING);
+        pending.setDirection(OrderDirection.BUY);
+        pending.setListing(listing(ListingType.STOCK, "NASDAQ"));
+        pending.setUserRole("EMPLOYEE");
+        pending.setUserId(99L);
+        pending.setApproximatePrice(new BigDecimal("500"));
+        pending.setAccountId(900L);
+        pending.setReservedAccountId(900L);
+
+        ActuaryInfo ai = new ActuaryInfo();
+        ai.setId(1L);
+        ai.setEmployee(testEmployee);
+        ai.setActuaryType(ActuaryType.AGENT);
+        ai.setUsedLimit(null); // trigger the null branch
+
+        when(orderRepository.findByIdForUpdate(88L)).thenReturn(Optional.of(pending));
+        when(accountRepository.findForUpdateById(900L)).thenReturn(Optional.of(bankUsd));
+        when(orderStatusService.getAgentInfo(99L)).thenReturn(Optional.of(ai));
+        when(orderRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+
+        orderService.approveOrder(88L);
+
+        // usedLimit becomes 0 + reservation amount
+        assertThat(ai.getUsedLimit()).isNotNull();
+        verify(actuaryInfoRepository).save(ai);
+    }
+
+    // ── createOrder agent BUY sa usedLimit == null (L216 ternary) ──
+    @Test
+    @DisplayName("createOrder agent BUY: usedLimit=null → ZERO fallback u ternary")
+    void createOrder_agentNullUsedLimit_usesZero() {
+        authEmployee("agent@test.com", "ROLE_ADMIN");
+
+        Listing l = listing(ListingType.STOCK, "NASDAQ");
+        when(listingRepository.findById(1L)).thenReturn(Optional.of(l));
+        when(listingPriceService.getPricePerUnit(any(), any(), any(), any())).thenReturn(new BigDecimal("151"));
+        when(listingPriceService.calculateApproximatePrice(anyInt(), any(), anyInt()))
+                .thenReturn(new BigDecimal("755"));
+        when(orderStatusService.determineStatus(anyString(), anyLong(), any())).thenReturn(OrderStatus.APPROVED);
+
+        ActuaryInfo ai = new ActuaryInfo();
+        ai.setId(2L);
+        ai.setEmployee(testEmployee);
+        ai.setActuaryType(ActuaryType.AGENT);
+        ai.setUsedLimit(null); // trigger null branch
+        when(orderStatusService.getAgentInfo(99L)).thenReturn(Optional.of(ai));
+        when(orderRepository.save(any())).thenAnswer(inv -> {
+            Order o = inv.getArgument(0);
+            o.setId(123L);
+            return o;
+        });
+
+        orderService.createOrder(dtoMarketBuy());
+
+        assertThat(ai.getUsedLimit()).isNotNull();
+        verify(actuaryInfoRepository).save(ai);
+    }
+
+    // ── declineOrder APPROVED EMPLOYEE: usedLimit null (L414 ternary) ──
+    @Test
+    @DisplayName("declineOrder APPROVED EMPLOYEE: usedLimit=null → ZERO fallback")
+    void declineOrder_employeeNullUsedLimit_usesZero() {
+        authEmployee("agent@test.com", "ROLE_ADMIN");
+
+        Order approved = new Order();
+        approved.setId(55L);
+        approved.setStatus(OrderStatus.APPROVED);
+        approved.setDirection(OrderDirection.BUY);
+        approved.setListing(listing(ListingType.STOCK, "NASDAQ"));
+        approved.setUserRole("EMPLOYEE");
+        approved.setUserId(99L);
+        approved.setReservedAmount(new BigDecimal("500"));
+
+        ActuaryInfo ai = new ActuaryInfo();
+        ai.setId(3L);
+        ai.setEmployee(testEmployee);
+        ai.setActuaryType(ActuaryType.AGENT);
+        ai.setUsedLimit(null); // trigger null branch in decline rollback
+
+        when(orderRepository.findByIdForUpdate(55L)).thenReturn(Optional.of(approved));
+        when(orderStatusService.getAgentInfo(99L)).thenReturn(Optional.of(ai));
+        when(orderRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+
+        orderService.declineOrder(55L);
+
+        // 0 - 500 maxed to ZERO
+        assertThat(ai.getUsedLimit()).isEqualByComparingTo(BigDecimal.ZERO);
+        verify(actuaryInfoRepository).save(ai);
     }
 }

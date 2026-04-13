@@ -460,4 +460,81 @@ class TaxServiceCoverageTest {
 
         verify(taxRecordRepository).findByFilters(null, null);
     }
+
+    // ─── getMyTaxRecord client without record (covers orElseGet branch L83-84) ──
+
+    @Test
+    @DisplayName("getMyTaxRecord: CLIENT without record returns empty DTO with full name")
+    void getMyTaxRecord_clientWithoutRecord_returnsEmptyDto() {
+        User user = new User("Marko", "Petrovic", "marko@x.com", "p", true, "CLIENT");
+        user.setId(77L);
+        when(employeeRepository.findByEmail("marko@x.com")).thenReturn(Optional.empty());
+        when(userRepository.findByEmail("marko@x.com")).thenReturn(Optional.of(user));
+        when(taxRecordRepository.findByUserIdAndUserType(77L, "CLIENT")).thenReturn(Optional.empty());
+
+        TaxRecordDto dto = taxService.getMyTaxRecord("marko@x.com");
+
+        assertThat(dto.getUserId()).isEqualTo(77L);
+        assertThat(dto.getUserName()).isEqualTo("Marko Petrovic");
+        assertThat(dto.getUserType()).isEqualTo("CLIENT");
+        assertThat(dto.getTaxOwed()).isEqualByComparingTo(BigDecimal.ZERO);
+    }
+
+    // ─── convertToRsd: amount == null short-circuit (L254) ─────────────────────
+
+    @Test
+    @DisplayName("convertToRsd reflectively: null amount returns ZERO")
+    void convertToRsd_nullAmount_returnsZero() throws Exception {
+        java.lang.reflect.Method m = TaxService.class.getDeclaredMethod(
+                "convertToRsd", BigDecimal.class, String.class);
+        m.setAccessible(true);
+        Object out = m.invoke(taxService, (BigDecimal) null, "USD");
+        assertThat((BigDecimal) out).isEqualByComparingTo(BigDecimal.ZERO);
+    }
+
+    @Test
+    @DisplayName("convertToRsd reflectively: null fromCurrency returns amount as-is")
+    void convertToRsd_nullFromCurrency_returnsAmount() throws Exception {
+        java.lang.reflect.Method m = TaxService.class.getDeclaredMethod(
+                "convertToRsd", BigDecimal.class, String.class);
+        m.setAccessible(true);
+        Object out = m.invoke(taxService, new BigDecimal("123.45"), (String) null);
+        assertThat((BigDecimal) out).isEqualByComparingTo("123.45");
+        verify(currencyConversionService, never()).convert(any(), any(), any());
+    }
+
+    // ─── resolveOrderCurrency: listing.getQuoteCurrency() throws (L243) ─────────
+
+    @Test
+    @DisplayName("resolveOrderCurrency reflectively: getQuoteCurrency throws → fallback RSD")
+    void resolveOrderCurrency_listingThrows_fallsBackToRsd() throws Exception {
+        Listing throwingListing = mock(Listing.class);
+        when(throwingListing.getQuoteCurrency()).thenThrow(new RuntimeException("lazy init boom"));
+
+        Order o = new Order();
+        o.setListing(throwingListing);
+
+        java.lang.reflect.Method m = TaxService.class.getDeclaredMethod(
+                "resolveOrderCurrency", Order.class);
+        m.setAccessible(true);
+        Object out = m.invoke(taxService, o);
+
+        assertThat((String) out).isEqualTo("RSD");
+    }
+
+    // ─── resolveOrderCurrency: order.getListing() == null branch ────────────────
+
+    @Test
+    @DisplayName("resolveOrderCurrency reflectively: null listing → fallback RSD")
+    void resolveOrderCurrency_nullListing_fallsBackToRsd() throws Exception {
+        Order o = new Order();
+        o.setListing(null);
+
+        java.lang.reflect.Method m = TaxService.class.getDeclaredMethod(
+                "resolveOrderCurrency", Order.class);
+        m.setAccessible(true);
+        Object out = m.invoke(taxService, o);
+
+        assertThat((String) out).isEqualTo("RSD");
+    }
 }

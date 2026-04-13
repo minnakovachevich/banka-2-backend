@@ -355,4 +355,17 @@ class ExchangeManagementServiceCoverageTest {
         assertThat(list.get(0).getCurrentLocalTime()).isNotNull();
         assertThat(list.get(0).isCurrentlyOpen()).isTrue();
     }
+
+    @Test
+    @DisplayName("nowInExchangeZone returns ZonedDateTime in given timezone")
+    void nowInExchangeZone_returnsCorrectZone() {
+        // Use a fresh non-spied service so the real method runs.
+        ExchangeManagementService realService = new ExchangeManagementService(exchangeRepository);
+        Exchange e = nyse();
+        e.setTimeZone("America/New_York");
+
+        ZonedDateTime result = realService.nowInExchangeZone(e);
+        assertThat(result).isNotNull();
+        assertThat(result.getZone()).isEqualTo(NY);
+    }
 }

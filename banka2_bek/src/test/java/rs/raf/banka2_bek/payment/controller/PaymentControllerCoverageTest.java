@@ -202,6 +202,32 @@ class PaymentControllerCoverageTest {
                 .andExpect(status().isBadRequest());
     }
 
+    @Test
+    @DisplayName("createPayment metoda direktno — 400 kad je OTP code blank (zaobilazi @Valid)")
+    void createPayment_blankOtp_directCall_returns400() {
+        CreatePaymentRequestDto dto = validDto();
+        dto.setOtpCode("");
+
+        org.springframework.http.ResponseEntity<PaymentResponseDto> resp =
+                paymentController.createPayment(dto, auth);
+
+        org.junit.jupiter.api.Assertions.assertEquals(400, resp.getStatusCode().value());
+        verify(paymentService, never()).createPayment(any());
+    }
+
+    @Test
+    @DisplayName("createPayment metoda direktno — 400 kad je OTP code null")
+    void createPayment_nullOtp_directCall_returns400() {
+        CreatePaymentRequestDto dto = validDto();
+        dto.setOtpCode(null);
+
+        org.springframework.http.ResponseEntity<PaymentResponseDto> resp =
+                paymentController.createPayment(dto, auth);
+
+        org.junit.jupiter.api.Assertions.assertEquals(400, resp.getStatusCode().value());
+        verify(paymentService, never()).createPayment(any());
+    }
+
     // ---------- GET /payments ----------
 
     @Test

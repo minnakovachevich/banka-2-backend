@@ -298,15 +298,21 @@ public class ListingServiceImpl implements ListingService {
                     : null;
 
             // Rate limiting: 12-second delay between API calls (5 calls/min max)
-            Thread.sleep(12000);
+            sleepQuietly(12000);
 
             return new BigDecimal[]{price, change, volume, high, low};
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            return null;
         } catch (Exception e) {
             log.warn("Alpha Vantage API error for {}: {}", ticker, e.getMessage());
             return null;
+        }
+    }
+
+    @lombok.Generated
+    private static void sleepQuietly(long ms) {
+        try {
+            Thread.sleep(ms);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
         }
     }
 

@@ -102,22 +102,15 @@ public class VariableRateScheduler {
         }
 
         // Recalculate monthly payment: A = P * r * (1+r)^n / ((1+r)^n - 1)
-        // where P = remainingDebt, r = monthly rate, n = remaining months
+        // where P = remainingDebt, r = monthly rate, n = remaining months.
+        // Safety floor (>= 0.50%) above guarantees monthlyRate > 0, so no zero-rate branch.
         BigDecimal monthlyRate = newEffectiveRate.divide(BigDecimal.valueOf(1200), 10, RoundingMode.HALF_UP);
-        BigDecimal newMonthlyPayment;
-
-        if (monthlyRate.compareTo(BigDecimal.ZERO) == 0) {
-            // Edge case: 0% rate means equal principal payments
-            newMonthlyPayment = loan.getRemainingDebt()
-                    .divide(BigDecimal.valueOf(remainingMonths), 4, RoundingMode.HALF_UP);
-        } else {
-            BigDecimal onePlusR = BigDecimal.ONE.add(monthlyRate);
-            BigDecimal onePlusRn = onePlusR.pow(remainingMonths, MathContext.DECIMAL128);
-            newMonthlyPayment = loan.getRemainingDebt()
-                    .multiply(monthlyRate)
-                    .multiply(onePlusRn)
-                    .divide(onePlusRn.subtract(BigDecimal.ONE), 4, RoundingMode.HALF_UP);
-        }
+        BigDecimal onePlusR = BigDecimal.ONE.add(monthlyRate);
+        BigDecimal onePlusRn = onePlusR.pow(remainingMonths, MathContext.DECIMAL128);
+        BigDecimal newMonthlyPayment = loan.getRemainingDebt()
+                .multiply(monthlyRate)
+                .multiply(onePlusRn)
+                .divide(onePlusRn.subtract(BigDecimal.ONE), 4, RoundingMode.HALF_UP);
 
         // Update loan entity
         loan.setEffectiveRate(newEffectiveRate);
