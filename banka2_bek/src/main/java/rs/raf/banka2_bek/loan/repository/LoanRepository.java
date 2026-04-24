@@ -17,9 +17,12 @@ public interface LoanRepository extends JpaRepository<Loan, Long> {
 
     Page<Loan> findByClientId(Long clientId, Pageable pageable);
 
+    // PG cast za null-safe parametre (vidi CLAUDE.md Runda 24.04).
+    // Enum parametre (LoanType, LoanStatus) ostavljamo bez cast-a jer Hibernate
+    // mapira preko @Enumerated(STRING) u context-u upita.
     @Query("SELECT l FROM Loan l WHERE " +
             "(:loanType IS NULL OR l.loanType = :loanType) AND " +
             "(:status IS NULL OR l.status = :status) AND " +
-            "(:accountNumber IS NULL OR l.account.accountNumber = :accountNumber)")
+            "(cast(:accountNumber as string) IS NULL OR l.account.accountNumber = cast(:accountNumber as string))")
     Page<Loan> findWithFilters(LoanType loanType, LoanStatus status, String accountNumber, Pageable pageable);
 }

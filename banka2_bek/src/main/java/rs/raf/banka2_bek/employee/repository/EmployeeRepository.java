@@ -19,11 +19,13 @@ public interface EmployeeRepository extends JpaRepository<Employee, Long> {
 
     Optional<Employee> findByEmail(String email);
 
+    // PostgreSQL ne moze da zakljuci tip kad je `:param` null, zato eksplicitan cast
+    // (vidi CLAUDE.md Runda 24.04 PG migracija — ista popravka za PaymentRepository/TransactionRepository).
     @Query("SELECT e FROM Employee e WHERE " +
-            "(:email IS NULL OR LOWER(e.email) LIKE LOWER(CONCAT('%', :email, '%'))) AND " +
-            "(:firstName IS NULL OR LOWER(e.firstName) LIKE LOWER(CONCAT('%', :firstName, '%'))) AND " +
-            "(:lastName IS NULL OR LOWER(e.lastName) LIKE LOWER(CONCAT('%', :lastName, '%'))) AND " +
-            "(:position IS NULL OR LOWER(e.position) LIKE LOWER(CONCAT('%', :position, '%')))")
+            "(cast(:email as string) IS NULL OR LOWER(e.email) LIKE LOWER(CONCAT('%', cast(:email as string), '%'))) AND " +
+            "(cast(:firstName as string) IS NULL OR LOWER(e.firstName) LIKE LOWER(CONCAT('%', cast(:firstName as string), '%'))) AND " +
+            "(cast(:lastName as string) IS NULL OR LOWER(e.lastName) LIKE LOWER(CONCAT('%', cast(:lastName as string), '%'))) AND " +
+            "(cast(:position as string) IS NULL OR LOWER(e.position) LIKE LOWER(CONCAT('%', cast(:position as string), '%')))")
     Page<Employee> findByFilters(
             @Param("email") String email,
             @Param("firstName") String firstName,

@@ -18,11 +18,12 @@ public interface ActuaryInfoRepository extends JpaRepository<ActuaryInfo, Long> 
 
     List<ActuaryInfo> findAllByActuaryType(ActuaryType actuaryType);
 
+    // PG cast za null-safe parametre (vidi CLAUDE.md Runda 24.04).
     @Query("SELECT a FROM ActuaryInfo a WHERE a.actuaryType = :type " +
-            "AND (:email IS NULL OR LOWER(a.employee.email) LIKE LOWER(CONCAT('%', :email, '%'))) " +
-            "AND (:firstName IS NULL OR LOWER(a.employee.firstName) LIKE LOWER(CONCAT('%', :firstName, '%'))) " +
-            "AND (:lastName IS NULL OR LOWER(a.employee.lastName) LIKE LOWER(CONCAT('%', :lastName, '%'))) " +
-            "AND (:position IS NULL OR LOWER(a.employee.position) LIKE LOWER(CONCAT('%', :position, '%')))")
+            "AND (cast(:email as string) IS NULL OR LOWER(a.employee.email) LIKE LOWER(CONCAT('%', cast(:email as string), '%'))) " +
+            "AND (cast(:firstName as string) IS NULL OR LOWER(a.employee.firstName) LIKE LOWER(CONCAT('%', cast(:firstName as string), '%'))) " +
+            "AND (cast(:lastName as string) IS NULL OR LOWER(a.employee.lastName) LIKE LOWER(CONCAT('%', cast(:lastName as string), '%'))) " +
+            "AND (cast(:position as string) IS NULL OR LOWER(a.employee.position) LIKE LOWER(CONCAT('%', cast(:position as string), '%')))")
     List <ActuaryInfo> findByTypeAndFilters(
             @Param("type") ActuaryType type,
             @Param("email") String email,

@@ -53,10 +53,11 @@ public interface AccountRepository extends JpaRepository<Account, Long> {
     List<Account> findAccessibleAccounts(@Param("clientId") Long clientId,
                                          @Param("status") AccountStatus status);
 
+    // PG cast za null-safe String parametar (vidi CLAUDE.md Runda 24.04).
     @Query("SELECT a FROM Account a LEFT JOIN a.client c LEFT JOIN a.company co WHERE "
-            + "(:ownerName IS NULL OR "
-            + "LOWER(CONCAT(c.firstName, ' ', c.lastName)) LIKE LOWER(CONCAT('%', :ownerName, '%')) OR "
-            + "LOWER(co.name) LIKE LOWER(CONCAT('%', :ownerName, '%')))")
+            + "(cast(:ownerName as string) IS NULL OR "
+            + "LOWER(CONCAT(c.firstName, ' ', c.lastName)) LIKE LOWER(CONCAT('%', cast(:ownerName as string), '%')) OR "
+            + "LOWER(co.name) LIKE LOWER(CONCAT('%', cast(:ownerName as string), '%')))")
     Page<Account> findAllWithOwnerFilter(@Param("ownerName") String ownerName, Pageable pageable);
 
     @Query("SELECT a FROM Account a WHERE a.company.registrationNumber = :regNumber")
