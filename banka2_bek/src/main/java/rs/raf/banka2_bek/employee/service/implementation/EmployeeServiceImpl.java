@@ -15,11 +15,13 @@ import rs.raf.banka2_bek.employee.event.EmployeeAccountCreatedEvent;
 import rs.raf.banka2_bek.employee.model.Employee;
 import rs.raf.banka2_bek.employee.repository.EmployeeRepository;
 import rs.raf.banka2_bek.employee.service.EmployeeService;
+import rs.raf.banka2_bek.investmentfund.service.InvestmentFundService;
 
 import java.security.SecureRandom;
 import java.time.LocalDateTime;
 import java.util.Base64;
 import java.util.HashSet;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -34,6 +36,7 @@ public class EmployeeServiceImpl implements EmployeeService {
     private final ActivationTokenRepository activationTokenRepository;
     private final PasswordEncoder passwordEncoder;
     private final ApplicationEventPublisher eventPublisher;
+    private final InvestmentFundService investmentFundService;
 
     private static final SecureRandom SECURE_RANDOM = new SecureRandom();
 
@@ -124,10 +127,63 @@ public class EmployeeServiceImpl implements EmployeeService {
         if (request.getPosition() != null) employee.setPosition(request.getPosition());
         if (request.getDepartment() != null) employee.setDepartment(request.getDepartment());
         if (request.getActive() != null) employee.setActive(request.getActive());
-        if (request.getPermissions() != null) employee.setPermissions(request.getPermissions());
+        if (request.getPermissions() != null) {
+            // P5 — Spec Celina 4 (Nova) §3797-3879:
+            // Ako se SUPERVISOR permisija UKLANJA supervizoru koji upravlja fondovima,
+            // vlasnistvo svih njegovih fondova prebacuje se na admina koji menja
+            // permisije (currentAdminId iz security konteksta — fallback: prvi
+            // aktivan admin u bazi). Ovo MORA da se desi PRE save-a permisija
+            // tako da audit log u InvestmentFundService.reassignFundManager
+            // zabeleyi pravu vrednost menadzera.
+            Set<String> oldPermissions = employee.getPermissions() != null
+                    ? new HashSet<>(employee.getPermissions())
+                    : new HashSet<>();
+            Set<String> newPermissions = new HashSet<>(request.getPermissions());
+            boolean wasSupervisor = oldPermissions.contains("SUPERVISOR")
+                    || oldPermissions.contains("ADMIN");
+            boolean isSupervisor = newPermissions.contains("SUPERVISOR")
+                    || newPermissions.contains("ADMIN");
+            if (wasSupervisor && !isSupervisor) {
+                Long newManagerId = resolveCurrentAdminId(id);
+                investmentFundService.reassignFundManager(id, newManagerId);
+            }
+            employee.setPermissions(request.getPermissions());
+        }
 
         employeeRepository.save(employee);
         return toResponse(employee);
+    }
+
+    /**
+     * Pronalazi admina koji ce primiti vlasnistvo nad fondovima nakon sto je
+     * supervizor izgubio permisiju. Strategija (po prioritetu):
+     *  1) Trenutno autentifikovani korisnik ako je admin (oni su izvrsili akciju)
+     *  2) Prvi aktivan zaposleni sa ADMIN permisijom (fallback)
+     *  3) {@code fallbackId} (originalni supervizor) ako ni 2 ne postoji —
+     *     u tom slucaju reassignFundManager je no-op (oldId == newId).
+     */
+    private Long resolveCurrentAdminId(Long fallbackId) {
+        try {
+            org.springframework.security.core.Authentication auth =
+                    org.springframework.security.core.context.SecurityContextHolder
+                            .getContext().getAuthentication();
+            if (auth != null && auth.getName() != null) {
+                java.util.Optional<Employee> me = employeeRepository.findByEmail(auth.getName());
+                if (me.isPresent() && me.get().getPermissions() != null
+                        && me.get().getPermissions().contains("ADMIN")) {
+                    return me.get().getId();
+                }
+            }
+        } catch (RuntimeException ignored) {
+            // Pad na fallback ispod
+        }
+        // Fallback: prvi admin
+        return employeeRepository.findAll().stream()
+                .filter(e -> Boolean.TRUE.equals(e.getActive()))
+                .filter(e -> e.getPermissions() != null && e.getPermissions().contains("ADMIN"))
+                .map(Employee::getId)
+                .findFirst()
+                .orElse(fallbackId);
     }
 
     public void deactivateEmployee(Long id) {

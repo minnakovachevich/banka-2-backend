@@ -2,70 +2,85 @@ package rs.raf.banka2_bek.interbank.controller;
 
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
-import rs.raf.banka2_bek.interbank.dto.InterbankEnvelopeDto;
+import rs.raf.banka2_bek.interbank.protocol.Message;
 
 /*
 ================================================================================
- TODO — INBOUND ENDPOINT ZA PORUKE OD DRUGIH BANAKA
+ TODO — INBOUND ENDPOINT ZA PORUKE OD DRUGIH BANAKA (PROTOKOL §2.11)
  Zaduzen: BE tim
- Spec referenca: Celina 4, komunikacija izmedju banaka
+ Spec ref: protokol §2.11 Sending messages, §2.10 Authentication,
+           §2.12 Message types
 --------------------------------------------------------------------------------
- JEDINSTVENA TACKA ZA SVE INBOUND PORUKE:
-   POST /bank-api/message
+ JEDINSTVENA TACKA ZA SVE INBOUND PORUKE (po protokolu):
+   POST /interbank
+   Content-Type: application/json
+   X-Api-Key: <token koji smo MI izdali toj banci>
 
- AUTHORIZATION:
- - Prepoznati partnera po `Authorization: Bearer <token>`.
- - Ako token nije u `interbank.partners[*].authToken`, 401.
- - Dodatno proveriti da `envelope.senderBankCode` odgovara partneru.
+ STATUSI ODGOVORA (§2.11):
+   202 Accepted — primljeno ali jos neobradeno; pošiljač retry-uje
+   200 OK       — primljeno + zavrseno; body = response (npr. TransactionVote
+                  za NEW_TX)
+   204 No Content — primljeno + zavrseno bez tela
+   401 — los X-Api-Key
+   400 — malformed envelope
+   500 — internal errors
 
- IDEMPOTENTNOST:
- - Pre obrade pozvati InterbankMessageService.isDuplicate(envelope.messageId).
- - Ako true, vrati poslednji odgovor iz audit loga (ili 200 OK sa istim body-jem).
+ AUTHENTICATION (§2.10):
+   - Procitaj X-Api-Key header
+   - Provera u BankRoutingService da postoji partner sa tim inboundToken-om
+   - Dodatno: envelope.idempotenceKey.routingNumber MORA biti routingNumber
+     tog partnera (sprecava CSRF iz druge banke)
 
- DISPATCH PO TIPU:
- - PREPARE, COMMIT, ABORT         -> InterbankPaymentService.handle*
- - RESERVE_SHARES, COMMIT_FUNDS,
-   TRANSFER_OWNERSHIP, FINAL_CONFIRM -> InterbankOtcService.handle*
- - CHECK_STATUS                   -> vratiti trenutni status transakcije
+ IDEMPOTENCY (§2.2):
+   - InterbankMessageService.findCachedResponse(envelope.idempotenceKey)
+   - Ako postoji: vrati cached response sa istim httpStatus-om (200/204)
+   - Ako ne: izvrsi handler, pa pozovi recordInboundResponse atomicno
 
- ODGOVOR:
- Svaka handle* metoda vraca InterbankEnvelopeDto (odgovor) koji se salje
- nazad. Primer: na PREPARE odgovori READY ili NOT_READY.
+ DISPATCH PO TIPU (§2.12):
+   NEW_TX      -> TransactionExecutorService.handleNewTx → vrati TransactionVote (200)
+   COMMIT_TX   -> TransactionExecutorService.handleCommitTx → 204
+   ROLLBACK_TX -> TransactionExecutorService.handleRollbackTx → 204
 
- GRESKE:
- - 400 za malformed envelope (validacija)
- - 401 za los token
- - 409 za duplikat koji smo vec obradili (ili 200 sa kesiranim odgovorom)
- - 500 za internal errors (sa InterbankCommunicationException wrapperom)
+ NAPOMENA:
+   Endpoint-ovi za public-stock, /negotiations/* i /user/* idu u
+   OtcNegotiationController (§3.1-3.7), NE ovde. Ovaj kontroler je samo
+   za §2 Transaction execution protocol.
 ================================================================================
 */
 @RestController
-@RequestMapping("/bank-api")
+@RequestMapping("/interbank")
 public class InterbankInboundController {
 
-    // TODO: injectovati InterbankPaymentService, InterbankOtcService, InterbankMessageService
+    // TODO: injectovati TransactionExecutorService, InterbankMessageService,
+    //   BankRoutingService, ObjectMapper
 
-    @PostMapping("/message")
-    public ResponseEntity<InterbankEnvelopeDto> receiveMessage(
-            @RequestHeader(value = "Authorization", required = false) String authHeader,
-            @RequestBody InterbankEnvelopeDto envelope) {
+    /**
+     * Glavni endpoint po §2.11. Body je Message<Type> envelope sa
+     * idempotenceKey + messageType + message (Transaction / CommitTransaction
+     * / RollbackTransaction).
+     *
+     * Vraca:
+     *  - 200 OK + TransactionVote za NEW_TX
+     *  - 204 No Content za COMMIT_TX, ROLLBACK_TX
+     *  - 202 Accepted ako poruka nije jos obradena (npr. backoff)
+     */
+    @PostMapping
+    public ResponseEntity<Object> receiveMessage(
+            @RequestHeader(value = "X-Api-Key", required = false) String apiKey,
+            @RequestBody Message<Object> envelope) {
         // TODO:
-        //  1. Parse + validate token
-        //  2. isDuplicate check
-        //  3. dispatch na PaymentService ili OtcService prema envelope.type
-        //  4. Upise INBOUND poruku u audit
-        //  5. Vrati response envelope
-        throw new UnsupportedOperationException("TODO: implementirati receiveMessage");
-    }
-
-    // TODO (opciono): GET /bank-api/otc/public-listings — vraca akcije koje
-    //   nase banka javno izlozila drugim bankama. Potrebno za discovery kod
-    //   partnera.
-    @GetMapping("/otc/public-listings")
-    public ResponseEntity<Object> publicListings(
-            @RequestHeader(value = "Authorization", required = false) String authHeader) {
-        // TODO: validate token, vrati listu javnih akcija (Portfolio.publicQuantity > 0)
-        //       u formatu OtcInterbankListingDto
-        throw new UnsupportedOperationException("TODO: implementirati publicListings");
+        //  1. §2.10 — provera X-Api-Key + envelope.idempotenceKey.routingNumber
+        //  2. §2.2 — InterbankMessageService.findCachedResponse → return cache hit
+        //  3. §2.12 dispatch po envelope.messageType:
+        //     case NEW_TX:      cast envelope.message → Transaction →
+        //                       TransactionExecutorService.handleNewTx
+        //                       → TransactionVote → 200
+        //     case COMMIT_TX:   cast → CommitTransaction →
+        //                       TransactionExecutorService.handleCommitTx → 204
+        //     case ROLLBACK_TX: cast → RollbackTransaction →
+        //                       TransactionExecutorService.handleRollbackTx → 204
+        //  4. Atomicno sa biznis logikom: InterbankMessageService.recordInboundResponse
+        //  5. Network/IO greske -> 500; biznis -> 200 sa NO glasom (ne 5xx)
+        throw new UnsupportedOperationException("TODO: implementirati POST /interbank");
     }
 }

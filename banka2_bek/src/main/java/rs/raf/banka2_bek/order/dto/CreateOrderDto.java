@@ -36,4 +36,14 @@ public class CreateOrderDto {
 
     @NotBlank(message = "Verifikacioni kod je obavezan")
     private String otpCode;
+
+    /**
+     * P3 — Spec Celina 4 (Nova) §3883-3964: kada supervizor kupuje hartiju
+     * u ime investicionog fonda, FE salje fundId. BE validira da:
+     *  - poziva ga supervizor
+     *  - fund postoji i supervizor je manager tog fonda
+     *  - fund.account.balance >= order.cost
+     * Null znaci da nije fond-trgovina (klijent ili banka).
+     */
+    private Long fundId;
 }

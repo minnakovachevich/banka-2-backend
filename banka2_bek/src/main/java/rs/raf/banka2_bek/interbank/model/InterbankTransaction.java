@@ -4,145 +4,103 @@ import jakarta.persistence.*;
 import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.NoArgsConstructor;
+import org.hibernate.annotations.ColumnDefault;
 
-import java.math.BigDecimal;
 import java.time.LocalDateTime;
 
 /*
 ================================================================================
- TODO — SAGA / 2PC TRACKING ZA INTER-BANK TRANSAKCIJE
- Zaduzen: BE tim (backend lead)
- Spec referenca: Celina 4, linije 368-437 (Placanja 2PC) i 473-519 (OTC SAGA)
+ INTERBANK TRANSACTION — STANJE 2PC TRANSAKCIJE (PROTOKOL §2.8)
+ Spec ref: protokol §2.8 Transactions, §2.8.4 Local execution,
+           §2.8.5 Remote execution
 --------------------------------------------------------------------------------
  SVRHA:
- Entitet koji prati stanje jedne distribuirane transakcije (placanje ili OTC
- iskoriscavanje opcije) izmedju nase banke i jedne druge banke. Svaka interbank
- transakcija prolazi kroz fazu: INITIATED -> PREPARED -> COMMITTED (happy path)
- ili INITIATED -> ABORTED (failure).
+   Persistentni trag svake distribuirane transakcije (placanja, OTC exercise,
+   bilo cega). Iz perspektive nase banke, ovaj entitet drzi:
+    - transactionId u protokol formi (foreignBankRouting + foreignBankIdString)
+    - ulogu (INITIATOR vs RECIPIENT)
+    - trenutnu fazu (PREPARING / PREPARED / COMMITTED / ROLLED_BACK / STUCK)
+    - blob sa originalnim Transaction objektom (JSON) — koristi se za retry,
+      verifikaciju i audit
+    - listu primljenih TransactionVote-ova (kao IB)
 
- OBAVEZNA POLJA (vec definisana ispod, samo provera):
-  - id                         PK
-  - transactionId              String, UUID, generisan na strani incijatora;
-                               koristi se za korelaciju poruka izmedju banaka
-  - type                       InterbankTransactionType enum (PAYMENT, OTC)
-  - status                     InterbankTransactionStatus enum
-  - senderBankCode             oznaka banke koja je inicirala (nase ili drugo)
-  - receiverBankCode           oznaka druge banke
-  - amount                     iznos u originalnoj valuti
-  - currency                   valuta (3-slovni kod)
-  - convertedAmount            iznos nakon konverzije u valuti primaoca (za
-                               placanja — nakon Prepare odgovora)
-  - convertedCurrency          valuta primaoca
-  - exchangeRate               primenjen kurs (null za iste valute)
-  - commissionAmount           provizija (iz Ready odgovora)
-  - senderAccountNumber        racun posiljaoca (nas)
-  - receiverAccountNumber      racun primaoca (njihov ili nas ako smo primalac)
-  - reservedAmount             kolicina koja je rezervisana na senderAccount-u
-                               (ili null ako smo mi primalac)
-  - listingId                  (za OTC) id akcije
-  - quantity                   (za OTC) broj akcija
-  - strikePrice                (za OTC) strike cena
-  - createdAt                  kada je inicirano
-  - preparedAt                 kada je Prepare faza zavrsena
-  - committedAt                kada je Commit faza zavrsena
-  - abortedAt                  kada je Abort poslat/primljen
-  - lastRetryAt                za retry scheduler
-  - retryCount                 broj pokusaja ponovnog slanja
-  - failureReason              string greska ako je ABORTED
-
- RELACIJE:
-  - Nema (namerno) jake relacije prema Account/Listing — entitet prati
-    "nesto spoljno", kopira potrebne identifikatore. Account resolution
-    u servisu po accountNumber-u.
-
- STATUSI (vidi InterbankTransactionStatus enum):
-  - INITIATED       — zahtev zapisan, jos nisu poslate poruke
-  - PREPARING       — Prepare poslat, cekamo Ready
-  - PREPARED        — Ready primljen; sredstva rezervisana
-  - COMMITTING      — Commit poslat, cekamo potvrdu
-  - COMMITTED       — Commit potvrdjen, transakcija uspesna
-  - ABORTING        — Abort poslat ili lokalni fail, rollback u toku
-  - ABORTED         — Transakcija neuspesna, sve kompenzovano
-  - STUCK           — Retry scheduler ne moze dalje (posle max pokusaja)
+ BLOB FORMAT:
+   `transaction_body` cuva ceo Transaction objekat iz protocol/ paketa
+   serijalizovan u JSON. Postingi se ne raspakuju u zasebne tabele jer:
+    a) protokol ih tretira kao opaque (no domain knowledge)
+    b) primenjivanje postinga (commitLocal) se radi kroz PostingApplier servis
+       koji parsira blob i poziva domenske operacije
+    c) audit cuva originalni format koji smo dobili / poslali
 
  INDEX:
-  - transaction_id (unique) — za lookup po UUID-u
-  - status + last_retry_at   — za retry scheduler
+   - (transaction_routing_number, transaction_id_string) UNIQUE — fast lookup
+   - (status, last_activity_at) — za retry scheduler
 
- LEKCIJE IZ INTRA-BANK OTC:
-  - Ne koristi @ManyToOne, zadrzi identifikatore kao stringove/Long-ove.
-  - @ColumnDefault je obavezan na bool/integer poljima (PostgreSQL).
+ NAPOMENA:
+   InterbankMessage je AUDIT za pojedinacne poruke (NEW_TX/COMMIT_TX/ROLLBACK_TX);
+   InterbankTransaction je STANJE distribuirane transakcije. Veza preko
+   transaction_id_string + transaction_routing_number.
 ================================================================================
 */
 @Entity
 @Table(name = "interbank_transactions", indexes = {
-        @Index(name = "idx_ibt_transaction_id", columnList = "transaction_id", unique = true),
-        @Index(name = "idx_ibt_status_retry",   columnList = "status, last_retry_at")
+        @Index(
+                name = "idx_ibt_transaction",
+                columnList = "transaction_routing_number, transaction_id_string",
+                unique = true
+        ),
+        @Index(name = "idx_ibt_status_activity", columnList = "status, last_activity_at")
 })
 @Data
 @NoArgsConstructor
 @AllArgsConstructor
 public class InterbankTransaction {
 
-    // TODO: proveri da li bi trebalo koristiti UUID kao PK. Preporuka: zadrzi
-    // auto-increment Long i drzi UUID u `transactionId` (unique string kolona).
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    @Column(name = "transaction_id", nullable = false, unique = true, length = 64)
-    private String transactionId;
+    /**
+     * §2.8.2 Transaction.transactionId.routingNumber — banka koja je formirala
+     * transakciju (Initiating Bank). Ako == nas, mi smo IB; inace smo RB.
+     */
+    @Column(name = "transaction_routing_number", nullable = false)
+    private Integer transactionRoutingNumber;
 
+    /**
+     * §2.8.2 Transaction.transactionId.id — opaque string max 64 bajta.
+     */
+    @Column(name = "transaction_id_string", nullable = false, length = 64)
+    private String transactionIdString;
+
+    /** Da li smo mi inicijator ili primalac. */
     @Enumerated(EnumType.STRING)
     @Column(nullable = false, length = 16)
-    private InterbankTransactionType type;
+    private InterbankTransactionRole role;
 
     @Enumerated(EnumType.STRING)
     @Column(nullable = false, length = 16)
     private InterbankTransactionStatus status;
 
-    @Column(name = "sender_bank_code", nullable = false, length = 16)
-    private String senderBankCode;
+    /**
+     * Originalni Transaction body (JSON, §2.8.2). Cuva se da bismo mogli da
+     * verifikujemo, retry-ujemo, ili audit-ujemo bez gubitka informacija.
+     * Razmotri @JdbcTypeCode(SqlTypes.JSON) za PG jsonb mapiranje.
+     */
+    @Column(name = "transaction_body", columnDefinition = "text", nullable = false)
+    private String transactionBody;
 
-    @Column(name = "receiver_bank_code", nullable = false, length = 16)
-    private String receiverBankCode;
+    /** Lista glasova kao IB (JSON niz TransactionVote-ova; null ako smo RB). */
+    @Column(name = "votes", columnDefinition = "text")
+    private String votes;
 
-    @Column(precision = 19, scale = 4)
-    private BigDecimal amount;
+    /** Razlog ROLLED_BACK ili STUCK statusa. */
+    @Column(name = "failure_reason", length = 1024)
+    private String failureReason;
 
-    @Column(length = 3)
-    private String currency;
-
-    @Column(name = "converted_amount", precision = 19, scale = 4)
-    private BigDecimal convertedAmount;
-
-    @Column(name = "converted_currency", length = 3)
-    private String convertedCurrency;
-
-    @Column(name = "exchange_rate", precision = 19, scale = 6)
-    private BigDecimal exchangeRate;
-
-    @Column(name = "commission_amount", precision = 19, scale = 4)
-    private BigDecimal commissionAmount;
-
-    @Column(name = "sender_account_number", length = 32)
-    private String senderAccountNumber;
-
-    @Column(name = "receiver_account_number", length = 32)
-    private String receiverAccountNumber;
-
-    @Column(name = "reserved_amount", precision = 19, scale = 4)
-    private BigDecimal reservedAmount;
-
-    // OTC-specific fields
-    @Column(name = "listing_ticker", length = 32)
-    private String listingTicker;
-
-    @Column(name = "quantity")
-    private Integer quantity;
-
-    @Column(name = "strike_price", precision = 19, scale = 4)
-    private BigDecimal strikePrice;
+    @Column(name = "retry_count", nullable = false)
+    @ColumnDefault("0")
+    private Integer retryCount = 0;
 
     @Column(name = "created_at", nullable = false)
     private LocalDateTime createdAt;
@@ -153,16 +111,18 @@ public class InterbankTransaction {
     @Column(name = "committed_at")
     private LocalDateTime committedAt;
 
-    @Column(name = "aborted_at")
-    private LocalDateTime abortedAt;
+    @Column(name = "rolled_back_at")
+    private LocalDateTime rolledBackAt;
 
-    @Column(name = "last_retry_at")
-    private LocalDateTime lastRetryAt;
+    @Column(name = "last_activity_at", nullable = false)
+    private LocalDateTime lastActivityAt;
 
-    @org.hibernate.annotations.ColumnDefault("0")
-    @Column(name = "retry_count", nullable = false)
-    private int retryCount;
-
-    @Column(name = "failure_reason", length = 1024)
-    private String failureReason;
+    /**
+     * Diskriminator uloge: jesmo li mi koordinator (poslali NEW_TX svima i
+     * sakupljamo glasove) ili samo participant (primili NEW_TX, glasamo).
+     */
+    public enum InterbankTransactionRole {
+        INITIATOR,
+        RECIPIENT
+    }
 }

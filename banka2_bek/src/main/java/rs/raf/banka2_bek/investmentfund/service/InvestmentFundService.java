@@ -1,8 +1,11 @@
 package rs.raf.banka2_bek.investmentfund.service;
 
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import rs.raf.banka2_bek.investmentfund.dto.InvestmentFundDtos.*;
+import rs.raf.banka2_bek.investmentfund.repository.InvestmentFundRepository;
 
 import java.time.LocalDate;
 import java.util.List;
@@ -66,10 +69,16 @@ import java.util.List;
   ClientFundPositionRepository, ClientFundTransactionRepository
 ================================================================================
 */
+@Slf4j
 @Service
+@RequiredArgsConstructor
 public class InvestmentFundService {
 
-    // TODO: injectovati sve potrebne repoze + FundValueCalculator + CurrencyConversionService
+    private final InvestmentFundRepository investmentFundRepository;
+    // TODO: injectovati ostale potrebne repoze + FundValueCalculator + CurrencyConversionService:
+    //   ClientFundPositionRepository, ClientFundTransactionRepository, FundValueSnapshotRepository,
+    //   AccountRepository, PortfolioRepository, ListingRepository, FundValueCalculator,
+    //   CurrencyConversionService, FundLiquidationService
 
     @Transactional
     public InvestmentFundDetailDto createFund(CreateFundDto dto, Long supervisorId) {
@@ -84,32 +93,125 @@ public class InvestmentFundService {
         throw new UnsupportedOperationException("TODO");
     }
 
+    /**
+     * P11 — Spec Celina 4 (Nova) §3592-3629: "Performanse fonda: tabela ili
+     * grafikon (mesecni, kvartalni ili godisnji prikaz)".
+     *
+     * Implementacija (kad bude):
+     *  - FundValueSnapshot tabela vec snima dnevno (FundValueSnapshotScheduler 23:45)
+     *  - Ovde agregiramo po granularity parametru:
+     *      - DAY    -> sve tacke izmedju [from, to]
+     *      - WEEK   -> grupisi po ISO sedmici, uzmi poslednju vrednost
+     *      - MONTH  -> grupisi po YYYY-MM, uzmi poslednju vrednost
+     *      - QUARTER-> grupisi po (YYYY, ceil(month/3)), poslednja vrednost
+     *      - YEAR   -> grupisi po YYYY, poslednja vrednost
+     *  - Vrati listu FundPerformancePointDto sortiranu po datumu ASC.
+     *
+     * FE FundDetailsPage ima toggle Day/Week/Month/Quarter/Year — ovde
+     * dodati granularity parametar kad bude.
+     */
     public List<FundPerformancePointDto> getPerformance(Long fundId, LocalDate from, LocalDate to) {
-        throw new UnsupportedOperationException("TODO");
+        throw new UnsupportedOperationException(
+                "TODO P11: implementirati performance agregaciju (DAY/WEEK/MONTH/QUARTER/YEAR)");
     }
 
+    /**
+     * P7 — Spec Celina 4 (Nova) §4338-4391 (Napomena 4): Provizija pri konverziji.
+     *  - Klijent uplacuje sa svog racuna -> ako je sourceAccount.currency != RSD,
+     *    primenjuje se 1% FX komisija (CurrencyConversionService.convertForPurchase
+     *    sa chargeFx=true).
+     *  - Supervizor uplacuje sa bankinog racuna -> 0% komisija (chargeFx=false).
+     *
+     * Zatim:
+     *  - tx = new ClientFundTransaction(status=PENDING, isInflow=true)
+     *  - debit sourceAccount, credit fund.account (RSD)
+     *  - tx.status = COMPLETED, save
+     *  - upsert ClientFundPosition: totalInvested += amount
+     *  - vrati ClientFundPositionDto sa derived %ofFund i currentValue
+     */
     @Transactional
     public ClientFundPositionDto invest(Long fundId, InvestFundDto dto, Long userId, String userRole) {
-        throw new UnsupportedOperationException("TODO");
+        throw new UnsupportedOperationException(
+                "TODO P7: implementirati invest — vidi javadoc iznad. "
+                + "Klijent: 1% FX komisija; Supervizor (banka): 0%.");
     }
 
+    /**
+     * P7 — Spec Celina 4 (Nova) §4338-4391 (Napomena 4): isto pravilo kao za invest,
+     * ali u suprotnom smeru. Plus P4 likvidacija ako fond nema dovoljno cash-a.
+     *
+     * Logika:
+     *  if (amount == null) amount = position.totalInvested  // pun withdraw
+     *  if (amount > position.totalInvested) -> 400 BadRequest
+     *  if (fund.account.balanceRsd >= amount):
+     *      odmah debit fund.account, credit user account
+     *      (chargeFx = userRole == CLIENT pri konverziji RSD -> targetCurrency)
+     *      tx.status = COMPLETED
+     *  else:
+     *      tx.status = PENDING
+     *      fundLiquidationService.liquidateFor(fundId, amount - balance)
+     *      (vidi P4 — auto-prodaja hartija)
+     *  position.totalInvested -= amount
+     *  if (position.totalInvested <= 0) brisi/active=false
+     */
     @Transactional
     public ClientFundTransactionDto withdraw(Long fundId, WithdrawFundDto dto, Long userId, String userRole) {
-        throw new UnsupportedOperationException("TODO");
+        throw new UnsupportedOperationException(
+                "TODO P7+P4: implementirati withdraw — vidi javadoc iznad. "
+                + "Klijent: 1% FX komisija u konverziji RSD -> account.currency; "
+                + "Supervizor (banka): 0% komisija. Ako fond nema cash-a, "
+                + "tx ostaje PENDING dok FundLiquidationService ne proda hartije.");
     }
 
     public List<ClientFundPositionDto> listMyPositions(Long userId, String userRole) {
         throw new UnsupportedOperationException("TODO");
     }
 
+    /**
+     * P9 — Spec Celina 4 (Nova) §4222 Napomena 2: Banka kao klijent fonda.
+     * Ovo vraca sve ClientFundPosition entitete gde je userRole='CLIENT' i
+     * userId == InvestmentFund.ownerClientId banke.
+     *
+     * Implementacija (kad bude):
+     *  Long ownerClientId = bankProperties.getOwnerClientId();
+     *  return positionRepository
+     *      .findByUserIdAndUserRole(ownerClientId, "CLIENT")
+     *      .stream().map(this::toClientFundPositionDto).toList();
+     *
+     * Trenutno baca UnsupportedOperationException; ProfitBankController
+     * lovi tu i vraca prazan list (graceful fallback) tako da FE moze
+     * renderovati "Banka nema pozicije" placeholder.
+     */
     public List<ClientFundPositionDto> listBankPositions() {
-        // Za Profit Banke portal — vrati sve pozicije koje su vlasnistvo banke
-        // (userId = bank.ownerClientId).
-        throw new UnsupportedOperationException("TODO");
+        throw new UnsupportedOperationException(
+                "TODO P9: implementirati listBankPositions — vidi javadoc iznad");
     }
 
+    /**
+     * P5 — Spec Celina 4 (Nova) §3797-3879: kad admin ukloni isSupervisor
+     * permisiju supervizoru koji upravlja fondovima, vlasnistvo svih tih
+     * fondova prebacuje se na admina koji je izvrsio uklanjanje.
+     *
+     * Vraca broj prebacenih fondova (>= 0). Ako oldSupervisor nema fondova,
+     * 0 — bezbedno za pozivanje na svaku permisiju-update operaciju.
+     *
+     * Pozivati iz:
+     *   - EmployeeService / AdminEmployeeService kad permisije menjaju
+     *   - Direktno iz nekog manualnog supervisor-portala dugmeta (ako postoji)
+     */
     @Transactional
     public int reassignFundManager(Long oldSupervisorId, Long newAdminId) {
-        throw new UnsupportedOperationException("TODO");
+        if (oldSupervisorId == null || newAdminId == null) {
+            return 0;
+        }
+        if (oldSupervisorId.equals(newAdminId)) {
+            return 0;
+        }
+        int reassigned = investmentFundRepository.reassignManager(oldSupervisorId, newAdminId);
+        if (reassigned > 0) {
+            log.info("InvestmentFund manager reassigned: {} fund(s) from employee #{} to employee #{}",
+                    reassigned, oldSupervisorId, newAdminId);
+        }
+        return reassigned;
     }
 }

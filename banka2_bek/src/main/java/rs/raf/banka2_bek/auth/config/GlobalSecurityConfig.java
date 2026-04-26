@@ -82,7 +82,26 @@ public class GlobalSecurityConfig  {
                         .requestMatchers(HttpMethod.POST, "/margin-accounts/*/withdraw").hasRole("CLIENT")
                         .requestMatchers(HttpMethod.POST, "/margin-accounts/*/deposit").hasRole("CLIENT")
                         .requestMatchers("/margin-accounts/**").authenticated()
-                        .requestMatchers("/otc/**").authenticated()
+                        // OTC: po Celini 4 (Nova) §145-148, samo SUPERVIZORI (od zaposlenih)
+                        // i KLIJENTI sa permisijom TRADE_STOCKS smeju pristupiti.
+                        // Agenti su EKSPLICITNO iskljuceni — finalna provera role
+                        // (klijent vs zaposleni vs agent) i dodatne validacije rade
+                        // se u OtcService (vidi ensureOtcAccess helper).
+                        .requestMatchers("/otc/**").hasAnyAuthority(
+                                "ROLE_ADMIN", "ROLE_CLIENT", "ADMIN", "SUPERVISOR", "CLIENT")
+                        // Investicioni fondovi: po Celini 4 (Nova), supervizori vide
+                        // discovery/details/create/portfolio + klijenti samo discovery+details.
+                        .requestMatchers("/funds/**").authenticated()
+                        // Profit Banke: samo supervizori (Celina 4 (Nova) §4393-4408).
+                        .requestMatchers("/profit-bank/**").hasAnyAuthority(
+                                "ROLE_ADMIN", "ADMIN", "SUPERVISOR")
+                        // Inter-bank /interbank endpoint je JEDINSTVEN ulaz za druge banke,
+                        // X-Api-Key auth se proverava u kontroleru (vidi protokol §2.10).
+                        // TODO: kad se implementira ApiKey filter (registrovan kao
+                        //       jwtAuthenticationFilter alternativa za ove pathove),
+                        //       zameniti permitAll sa custom matcher-om koji preskace JWT.
+                        .requestMatchers("/interbank/**", "/negotiations/**",
+                                "/public-stock", "/user/*/**").permitAll()
                         .anyRequest().authenticated()
                 )
                 .formLogin(AbstractHttpConfigurer::disable)

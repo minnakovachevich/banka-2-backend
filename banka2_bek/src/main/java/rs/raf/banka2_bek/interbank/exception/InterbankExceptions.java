@@ -2,20 +2,26 @@ package rs.raf.banka2_bek.interbank.exception;
 
 /*
 ================================================================================
- TODO — EXCEPTION HIJERARHIJA ZA INTER-BANK SLOJ
- Zaduzen: BE tim
+ EXCEPTION HIJERARHIJA ZA INTER-BANK SLOJ (PROTOKOL §2.9-§2.11)
 --------------------------------------------------------------------------------
  InterbankException (base RuntimeException)
-   ├─ InterbankCommunicationException  — HTTP/mrezne greske (timeout, 5xx, unknown bank)
-   ├─ InterbankProtocolException       — validation (nevalidan payload, unknown type)
-   └─ InterbankTransactionStuckException — retry scheduler odustao
+   ├─ InterbankCommunicationException  — HTTP/mrezne greske (timeout, 5xx,
+   │                                     unknown bank, network failure)
+   ├─ InterbankAuthException           — §2.10 los X-Api-Key (401 napred-nazad)
+   ├─ InterbankProtocolException       — validacija (nevalidan envelope,
+   │                                     unknown messageType, unbalanced tx,
+   │                                     malformed JSON)
+   ├─ InterbankIdempotencyException    — §2.2 konflikti pri trajnom belezenju
+   │                                     idempotence kljuceva
+   └─ InterbankTransactionStuckException — retry scheduler odustao posle MAX_RETRY
 
- HANDLER:
- Registrovati @RestControllerAdvice u istoj paketi (vidi
- InterbankExceptionHandler.java) koji mapira exceptione u HTTP kodove:
-  - Communication  -> 502 Bad Gateway (nepratilo)
-  - Protocol       -> 400
-  - Stuck          -> 500
+ HTTP MAPING (u @RestControllerAdvice):
+   InterbankCommunicationException     -> 502 Bad Gateway
+   InterbankAuthException              -> 401 Unauthorized (outbound problem)
+                                       -> 401 takodje za inbound los token
+   InterbankProtocolException          -> 400 Bad Request
+   InterbankIdempotencyException       -> 500 (retry pokupi)
+   InterbankTransactionStuckException  -> 500 (manuelna intervencija)
 ================================================================================
 */
 public final class InterbankExceptions {
@@ -32,8 +38,18 @@ public final class InterbankExceptions {
         public InterbankCommunicationException(String message, Throwable cause) { super(message, cause); }
     }
 
+    /** §2.10 — los ili nedostaje X-Api-Key. */
+    public static class InterbankAuthException extends InterbankException {
+        public InterbankAuthException(String message) { super(message); }
+    }
+
     public static class InterbankProtocolException extends InterbankException {
         public InterbankProtocolException(String message) { super(message); }
+    }
+
+    /** §2.2 — duplikat pri belezenju idempotence kljuca ili stale cached response. */
+    public static class InterbankIdempotencyException extends InterbankException {
+        public InterbankIdempotencyException(String message) { super(message); }
     }
 
     public static class InterbankTransactionStuckException extends InterbankException {

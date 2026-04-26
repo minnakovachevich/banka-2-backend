@@ -38,4 +38,10 @@ public class OrderDto {
     private BigDecimal fxCommission;
     /** Kurs listing -> account currency (mid) u trenutku rezervacije/odobravanja. */
     private BigDecimal exchangeRate;
+    /**
+     * P3 — Spec Celina 4 (Nova) §3883-3964: ako je nalog kreiran u ime
+     * investicionog fonda (supervizor flow), ovde stoji fund.id; FE prikazuje
+     * "Kupljeno za fond X" badge u OrdersListPage.
+     */
+    private Long fundId;
 }

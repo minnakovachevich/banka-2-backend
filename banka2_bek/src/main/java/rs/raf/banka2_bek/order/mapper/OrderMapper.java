@@ -53,6 +53,7 @@ public final class OrderMapper {
         dto.setListingSettlementDate(order.getListing() != null ? order.getListing().getSettlementDate() : null);
         dto.setFxCommission(order.getFxCommission());
         dto.setExchangeRate(order.getExchangeRate());
+        dto.setFundId(order.getFundId());
 
         return dto;
     }

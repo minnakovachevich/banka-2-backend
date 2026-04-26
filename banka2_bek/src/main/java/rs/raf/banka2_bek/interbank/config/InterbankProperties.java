@@ -9,29 +9,35 @@ import java.util.List;
 
 /*
 ================================================================================
- TODO — KONFIGURACIJA PARTNERSKIH BANAKA
+ TODO — KONFIGURACIJA PARTNERSKIH BANAKA (PROTOKOL §2.1, §2.10)
  Zaduzen: BE tim
- Spec referenca: Celina 4, linija 367 "dovoljno je da svaka banka komunicira
-                                       sa jednom drugom"
+ Spec ref: protokol §2.1 Bank identification (RoutingNumber = prve 3 cifre
+           racuna), §2.10 Authentication (X-Api-Key header)
 --------------------------------------------------------------------------------
  Citaj iz application.properties:
-   interbank.my-bank-code=BANKA2
-   interbank.my-account-prefix=222
-   interbank.partners[0].code=BANKA1
-   interbank.partners[0].account-prefix=111
+   interbank.my-routing-number=222
+   interbank.my-bank-display-name=Banka 2
+   interbank.partners[0].routing-number=111
+   interbank.partners[0].display-name=Banka 1
    interbank.partners[0].base-url=http://banka1-api:8080
-   interbank.partners[0].auth-token=sekret1
-   interbank.partners[1].code=BANKA3
+   interbank.partners[0].outbound-token=<token koji oni izdaju nama>
+   interbank.partners[0].inbound-token=<token koji mi izdajemo njima>
+   interbank.partners[1].routing-number=333
    ...
 
  KORISNICI:
   - BankRoutingService: po prva 3 cifre racuna mapira na PartnerBank.
-  - InterbankClient: na osnovu bankCode-a pronadje URL i salje HTTP zahtev.
+  - InterbankClient: na osnovu routingNumber-a pronadje URL + outboundToken
+    i salje HTTP zahtev sa X-Api-Key: <outboundToken> header-om (§2.10).
+  - InterbankInboundController: proverava da X-Api-Key header u dolaznoj
+    poruci odgovara `partners[*].inboundToken` (token koji smo MI izdali
+    toj banci). Nevalidan token -> 401.
 
- SECURITY:
-  - auth-token se salje u Authorization header u inter-bank pozivima.
-  - Inbound endpoint (InterbankInboundController) proverava token prema
-    `partners[*].auth-token`. Nevalidan token → 401.
+ NAPOMENA O DVA TOKEN-A:
+  Svaka banka izdaje sopstveni API token za svaku drugu banku (§2.10).
+  Tokeni su asimetricni: token koji A koristi pri slanju ka B nije isti
+  kao token koji B koristi pri slanju ka A. Dva polja: outboundToken
+  (sta saljemo mi) + inboundToken (sta verifikujemo mi).
 ================================================================================
 */
 @Configuration
@@ -39,20 +45,30 @@ import java.util.List;
 @Data
 public class InterbankProperties {
 
-    /** Kod nase banke; koristi se u `senderBankCode` svih outbound poruka. */
-    private String myBankCode;
+    /** Routing number nase banke (prve 3 cifre svakog naseg racuna). */
+    private Integer myRoutingNumber;
 
-    /** Prefix svakog naseg racuna (prve 3 cifre). */
-    private String myAccountPrefix;
+    /** Display name nase banke koji se vraca u UserInformation.bankDisplayName (§3.7). */
+    private String myBankDisplayName;
 
     /** Lista partnerskih banaka sa kojima smo u komunikaciji. */
     private List<PartnerBank> partners = new ArrayList<>();
 
     @Data
     public static class PartnerBank {
-        private String code;
-        private String accountPrefix;
+        /** Routing number partnerske banke. */
+        private Integer routingNumber;
+
+        /** Display name partnerske banke (za UI). */
+        private String displayName;
+
+        /** Base URL partnerskog API-ja, npr. "http://banka1-api:8080". */
         private String baseUrl;
-        private String authToken;
+
+        /** Token koji partner banka izdaje nama; saljemo ga u X-Api-Key headeru. */
+        private String outboundToken;
+
+        /** Token koji mi izdajemo partner banci; verifikujemo ga u X-Api-Key headeru. */
+        private String inboundToken;
     }
 }

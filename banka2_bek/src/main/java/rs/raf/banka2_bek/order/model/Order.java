@@ -128,4 +128,15 @@ public class Order {
      */
     @Column(name = "next_fill_at")
     private LocalDateTime nextFillAt;
+
+    /**
+     * P3 — Spec Celina 4 (Nova) §3883-3964: kada supervizor kupuje hartiju
+     * u ime investicionog fonda, ovde se belezi fondId. Pri commit-u, hartija
+     * ulazi u portfolio fonda (ne supervizora), a sredstva se skidaju sa
+     * RSD racuna fonda umesto sa bankinog racuna.
+     *
+     * Null znaci da je trgovina za banku (employees) ili za klijenta.
+     */
+    @Column(name = "fund_id")
+    private Long fundId;
 }

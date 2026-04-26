@@ -17,6 +17,9 @@ import rs.raf.banka2_bek.order.model.Order;
 import rs.raf.banka2_bek.order.model.OrderDirection;
 import rs.raf.banka2_bek.order.repository.OrderRepository;
 import rs.raf.banka2_bek.order.service.CurrencyConversionService;
+import rs.raf.banka2_bek.otc.model.OtcContract;
+import rs.raf.banka2_bek.otc.model.OtcContractStatus;
+import rs.raf.banka2_bek.otc.repository.OtcContractRepository;
 import rs.raf.banka2_bek.stock.model.ListingType;
 import rs.raf.banka2_bek.stock.util.ListingCurrencyResolver;
 import rs.raf.banka2_bek.tax.dto.TaxRecordDto;
@@ -27,6 +30,7 @@ import rs.raf.banka2_bek.tax.util.TaxConstants;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.LocalDateTime;
+import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -41,12 +45,16 @@ import java.util.stream.Collectors;
 public class TaxService {
 
 
+    private static final Set<ListingType> TAXABLE_LISTING_TYPES =
+            EnumSet.of(ListingType.STOCK, ListingType.FOREX, ListingType.FUTURES);
+
     private final TaxRecordRepository taxRecordRepository;
     private final OrderRepository orderRepository;
     private final UserRepository userRepository;
     private final EmployeeRepository employeeRepository;
     private final AccountRepository accountRepository;
     private final CurrencyConversionService currencyConversionService;
+    private final OtcContractRepository otcContractRepository;
 
     @Value("${bank.registration-number}")
     private String bankRegistrationNumber;
@@ -93,37 +101,107 @@ public class TaxService {
     /**
      * Pokrece obracun i naplatu poreza za sve korisnike koji imaju ordere.
      *
-     * Spec (Celina 3 — Porez): "Mi cemo racunati porez na kapitalnu dobit
-     * prilikom prodaje akcija (preko berze i OTC trgovinom)." — pa su
-     * FUTURES i FOREX orderi iskljuceni iz obracuna.
+     * Spec (Celina 3 — Porez): porez na kapitalnu dobit prilikom prodaje
+     * akcija "preko berze i OTC trgovinom". Profesorovo pojasnjenje
+     * (RAF Discord, 2026-04-26): porez se obracunava i za FOREX (slicno
+     * kao stock) i opciono za FUTURES (komplicirano kod isteka jer fizicki
+     * dospeva roba, ali u nasem sistemu ne hendlamo dospece — tretiramo
+     * ga kao stock). Zato OrderRepository.findByIsDoneTrue() ulazi u
+     * obracun za sve trgovacke tipove (STOCK, FOREX, FUTURES). OPCIJE se
+     * ne kupuju kroz Order entitet, ne ulaze ovde.
      *
-     * Za svakog korisnika: totalProfit = sum(STOCK SELL profit - STOCK BUY cost)
+     * Za svakog korisnika: totalProfit = sum(SELL value - BUY cost) po listingu,
      * konvertovano u RSD po srednjem kursu (bez provizije) — spec, Napomena 2.
      * Porez = 15% * totalProfit ako je pozitivan, inace 0.
      * Neplaceni deo se skida sa korisnikovog RSD racuna i ide na drzavni RSD racun.
+     *
+     * OTC trgovina (Celina 4): EXERCISED ugovor tretiramo kao prodaju akcija po
+     * strikePrice za prodavca i kao kupovinu po strikePrice za kupca; dodatno
+     * primljena/placena premija ulazi u sell/buy stranu kao realizovani prihod
+     * odnosno trosak vezan za listing. Intra-bank OTC pokriva samo akcije.
      */
     @Transactional
     public void calculateTaxForAllUsers() {
         LocalDateTime now = LocalDateTime.now();
         List<Order> allDoneOrders = orderRepository.findByIsDoneTrue().stream()
                 .filter(o -> o.getListing() != null
-                        && o.getListing().getListingType() == ListingType.STOCK)
+                        && TAXABLE_LISTING_TYPES.contains(o.getListing().getListingType()))
                 .collect(Collectors.toList());
+
+        // TODO (Celina 3 — opcije, Celina 4 — inter-bank OTC):
+        //   1) OPCIJE: OptionService.exerciseOption trenutno radi direktan
+        //      portfolio update + bank account debit/credit, ne kreira Order.
+        //      PUT exercise je faktickom svojstvom prodaja akcija po strike-u
+        //      i trebalo bi da ulazi u kapitalnu dobit. Plan:
+        //        a) novi entitet OptionExerciseRecord
+        //           (userId, userRole, listingId, quantity, strikePrice,
+        //            optionType, exercisedAt) koji se inserts u
+        //           OptionService.exerciseOption
+        //        b) ovde injectovati OptionExerciseRecordRepository i agregirati
+        //           recordove u sellByListing (PUT exercise → SELL po strikePrice)
+        //           odnosno buyByListing (CALL exercise → BUY po strikePrice)
+        //   2) INTER-BANK OTC: kad InterbankOtcService bude implementiran, iste
+        //      EXERCISED ugovore (sad u InterbankOtcContract ili kako se entitet
+        //      bude zvao) treba dodati u sellByListing/buyByListing po istoj
+        //      logici kao intra-bank OTC ispod. Posebno: kupac/prodavac mogu biti
+        //      iz druge banke — ti userKey-evi se preskacu (tax obracunava samo
+        //      domace korisnike, partner banka radi svoj obracun).
+        //   Tracking: spec Celina 3, linija 517 pominje "OTC trgovinu" generalno
+        //   (intra+inter); profesor (Discord 26.04.2026) potvrdio da forex/futures
+        //   ulaze. Opcije nisu eksplicitno potvrdjene, ali PUT exercise je
+        //   semanticki prodaja akcija — bezbedno je uracunati.
 
         // Grupisemo ordere po userId + userRole
         Map<String, List<Order>> grouped = allDoneOrders.stream()
                 .collect(Collectors.groupingBy(o -> o.getUserId() + ":" + o.getUserRole()));
+
+        // OTC: ucitaj sve EXERCISED ugovore — svaki utice na dva korisnika
+        // (kupca i prodavca), pa ne mozemo direktno groupingBy.
+        List<OtcContract> exercisedContracts = otcContractRepository.findAll().stream()
+                .filter(c -> c.getStatus() == OtcContractStatus.EXERCISED
+                        && c.getListing() != null
+                        && c.getListing().getListingType() == ListingType.STOCK)
+                .collect(Collectors.toList());
+
+        // userKey -> listingId -> akumulirana vrednost
+        Map<String, Map<Long, BigDecimal>> otcSellByUser = new HashMap<>();
+        Map<String, Map<Long, BigDecimal>> otcBuyByUser = new HashMap<>();
+        Map<Long, String> otcListingCurrency = new HashMap<>();
+        Set<String> otcUserKeys = new HashSet<>();
+
+        for (OtcContract c : exercisedContracts) {
+            Long listingId = c.getListing().getId();
+            otcListingCurrency.putIfAbsent(listingId,
+                    ListingCurrencyResolver.resolveSafe(c.getListing(), "RSD"));
+
+            BigDecimal qty = BigDecimal.valueOf(c.getQuantity());
+            BigDecimal strikeTotal = c.getStrikePrice().multiply(qty);
+            BigDecimal premium = c.getPremium() != null ? c.getPremium() : BigDecimal.ZERO;
+
+            String sellerKey = c.getSellerId() + ":" + c.getSellerRole();
+            String buyerKey = c.getBuyerId() + ":" + c.getBuyerRole();
+            otcUserKeys.add(sellerKey);
+            otcUserKeys.add(buyerKey);
+
+            otcSellByUser.computeIfAbsent(sellerKey, k -> new HashMap<>())
+                    .merge(listingId, strikeTotal.add(premium), BigDecimal::add);
+            otcBuyByUser.computeIfAbsent(buyerKey, k -> new HashMap<>())
+                    .merge(listingId, strikeTotal.add(premium), BigDecimal::add);
+        }
 
         // Pronadji drzavni RSD racun (racun Republike Srbije za uplatu poreza)
         Account stateAccount = accountRepository
                 .findBankAccountByCurrency(stateRegistrationNumber, "RSD")
                 .orElse(null);
 
-        for (Map.Entry<String, List<Order>> entry : grouped.entrySet()) {
-            String[] parts = entry.getKey().split(":");
+        Set<String> allKeys = new HashSet<>(grouped.keySet());
+        allKeys.addAll(otcUserKeys);
+
+        for (String key : allKeys) {
+            String[] parts = key.split(":");
             Long userId = Long.parseLong(parts[0]);
             String userRole = parts[1];
-            List<Order> userOrders = entry.getValue();
+            List<Order> userOrders = grouped.getOrDefault(key, List.of());
 
             // Racunamo profit per-asset: za svaki listing posebno racunamo sell - buy
             // pa sabiramo samo pozitivne profite (kapitalna dobit).
@@ -147,6 +225,20 @@ public class TaxService {
                     buyByListing.merge(listingId, orderValue, BigDecimal::add);
                 }
             }
+
+            // OTC EXERCISED kontribucije za ovog korisnika.
+            otcSellByUser.getOrDefault(key, Map.of())
+                    .forEach((listingId, value) -> {
+                        sellByListing.merge(listingId, value, BigDecimal::add);
+                        currencyByListing.putIfAbsent(listingId,
+                                otcListingCurrency.getOrDefault(listingId, "RSD"));
+                    });
+            otcBuyByUser.getOrDefault(key, Map.of())
+                    .forEach((listingId, value) -> {
+                        buyByListing.merge(listingId, value, BigDecimal::add);
+                        currencyByListing.putIfAbsent(listingId,
+                                otcListingCurrency.getOrDefault(listingId, "RSD"));
+                    });
 
             // Za svaki listing: profit = sell - buy, konvertuj u RSD, akumuliraj.
             // NET dobit/gubitak se racuna preko svih listinga; porez je 0 ako je total <= 0.

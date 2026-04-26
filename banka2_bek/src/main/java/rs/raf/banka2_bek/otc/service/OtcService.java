@@ -4,6 +4,9 @@ import jakarta.persistence.EntityNotFoundException;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.security.access.AccessDeniedException;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.GrantedAuthority;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import rs.raf.banka2_bek.account.model.Account;
@@ -94,10 +97,16 @@ public class OtcService {
      */
     public List<OtcListingDto> listDiscoveryListings() {
         UserContext me = resolveCurrentUser();
+        ensureOtcAccess(me);
+        // P3 — Klijenti vide samo ponude klijenata, supervizori samo supervizora.
+        // Spec Celina 4 (Nova) §822-826 + Celina 5 (Nova) §840-848.
+        boolean meIsClient = UserRole.isClient(me.userRole());
         List<Portfolio> publicPortfolios = portfolioRepository.findAll().stream()
                 .filter(p -> p.getPublicQuantity() != null && p.getPublicQuantity() > 0)
                 .filter(p -> !(p.getUserId().equals(me.userId())
                         && me.userRole().equals(p.getUserRole())))
+                .filter(p -> meIsClient ? UserRole.isClient(p.getUserRole())
+                                        : UserRole.isEmployee(p.getUserRole()))
                 .toList();
         return publicPortfolios.stream()
                 .map(this::toListingDto)
@@ -110,6 +119,7 @@ public class OtcService {
 
     public List<OtcOfferDto> listMyActiveOffers() {
         UserContext me = resolveCurrentUser();
+        ensureOtcAccess(me);
         List<OtcOffer> offers = offerRepository.findActiveForUser(me.userId(), me.userRole());
         return offers.stream().map(o -> mapOffer(o, me.userId())).toList();
     }
@@ -117,6 +127,7 @@ public class OtcService {
     @Transactional
     public OtcOfferDto createOffer(CreateOtcOfferDto dto) {
         UserContext me = resolveCurrentUser();
+        ensureOtcAccess(me);
         Listing listing = listingRepository.findById(dto.getListingId())
                 .orElseThrow(() -> new EntityNotFoundException("Listing ne postoji: " + dto.getListingId()));
         if (listing.getListingType() != ListingType.STOCK) {
@@ -128,6 +139,7 @@ public class OtcService {
         if (me.userId().equals(dto.getSellerId()) && me.userRole().equals(sellerRole)) {
             throw new IllegalArgumentException("Ne mozete napraviti OTC ponudu sami sebi.");
         }
+        ensureSameRoleParticipants(me.userRole(), sellerRole);
 
         Portfolio sellerPortfolio = portfolioRepository
                 .findByUserIdAndUserRole(dto.getSellerId(), sellerRole).stream()
@@ -163,7 +175,9 @@ public class OtcService {
     @Transactional
     public OtcOfferDto counterOffer(Long offerId, CounterOtcOfferDto dto) {
         UserContext me = resolveCurrentUser();
+        ensureOtcAccess(me);
         OtcOffer offer = loadActiveOfferForParticipant(offerId, me);
+        ensureSameRoleParticipants(offer.getBuyerRole(), offer.getSellerRole());
 
         boolean isBuyer = offer.getBuyerId().equals(me.userId())
                 && offer.getBuyerRole().equals(me.userRole());
@@ -203,6 +217,7 @@ public class OtcService {
     @Transactional
     public OtcOfferDto declineOffer(Long offerId) {
         UserContext me = resolveCurrentUser();
+        ensureOtcAccess(me);
         OtcOffer offer = loadActiveOfferForParticipant(offerId, me);
         offer.setStatus(OtcOfferStatus.DECLINED);
         offer.setLastModifiedById(me.userId());
@@ -218,7 +233,9 @@ public class OtcService {
     @Transactional
     public OtcOfferDto acceptOffer(Long offerId, Long buyerAccountId) {
         UserContext me = resolveCurrentUser();
+        ensureOtcAccess(me);
         OtcOffer offer = loadActiveOfferForParticipant(offerId, me);
+        ensureSameRoleParticipants(offer.getBuyerRole(), offer.getSellerRole());
 
         if (!me.userId().equals(offer.getWaitingOnUserId())) {
             throw new IllegalStateException("Nije na vama red da odgovorite na ovu ponudu.");
@@ -272,6 +289,7 @@ public class OtcService {
 
     public List<OtcContractDto> listMyContracts(String statusFilter) {
         UserContext me = resolveCurrentUser();
+        ensureOtcAccess(me);
         List<OtcContract> contracts;
         if (statusFilter == null || statusFilter.isBlank() || "ALL".equalsIgnoreCase(statusFilter)) {
             contracts = contractRepository.findAllForUser(me.userId(), me.userRole());
@@ -294,6 +312,7 @@ public class OtcService {
     @Transactional
     public OtcContractDto exerciseContract(Long contractId, Long buyerAccountId) {
         UserContext me = resolveCurrentUser();
+        ensureOtcAccess(me);
         OtcContract contract = contractRepository.findById(contractId)
                 .orElseThrow(() -> new EntityNotFoundException("OTC ugovor ne postoji: " + contractId));
 
@@ -390,6 +409,53 @@ public class OtcService {
     }
 
     // ────────────────────────── Helpers ──────────────────────────
+
+    /**
+     * P1 — Spec Celina 4 (Nova) §145-148: OTC dozvoljen samo SUPERVIZORIMA
+     * (od zaposlenih) i KLIJENTIMA. Agenti su eksplicitno iskljuceni.
+     * Spring SecurityConfig vec hvata role; ovaj poziv je defense-in-depth
+     * za slucaj da neko zaobidje filter (npr. test sa @WithMockUser).
+     */
+    private void ensureOtcAccess(UserContext user) {
+        String role = user.userRole();
+        if (UserRole.isClient(role)) {
+            return;
+        }
+        // Za zaposlene: dozvoljeni samo supervizori (admini su uvek supervizori).
+        // Agent koji nema SUPERVISOR niti ADMIN authority dobija 403.
+        if (UserRole.isEmployee(role)) {
+            Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+            if (auth == null) {
+                throw new AccessDeniedException("Niste autentifikovani.");
+            }
+            boolean isSupervisor = auth.getAuthorities().stream()
+                    .map(GrantedAuthority::getAuthority)
+                    .anyMatch(a -> "ADMIN".equals(a)
+                            || "SUPERVISOR".equals(a)
+                            || "ROLE_ADMIN".equals(a)
+                            || "ROLE_SUPERVISOR".equals(a));
+            if (!isSupervisor) {
+                throw new AccessDeniedException(
+                        "OTC je dozvoljen samo supervizorima i klijentima (po Celini 4 Nova).");
+            }
+            return;
+        }
+        throw new AccessDeniedException("Nepoznata uloga ne moze pristupiti OTC-u.");
+    }
+
+    /**
+     * P2 — Spec Celina 4 (Nova) §822-826: "Komuniciraju 2 klijenta ili 2 supervizora".
+     * Klijent nikad ne sklapa ugovor sa supervizorom — strane moraju biti iste role.
+     */
+    private void ensureSameRoleParticipants(String roleA, String roleB) {
+        boolean bothClients = UserRole.isClient(roleA) && UserRole.isClient(roleB);
+        boolean bothEmployees = UserRole.isEmployee(roleA) && UserRole.isEmployee(roleB);
+        if (!bothClients && !bothEmployees) {
+            throw new IllegalArgumentException(
+                    "OTC trgovina je dozvoljena samo izmedju ucesnika iste role "
+                            + "(klijent-klijent ili supervizor-supervizor).");
+        }
+    }
 
     private void ensureSettlementInFuture(LocalDate settlementDate) {
         if (settlementDate == null) {

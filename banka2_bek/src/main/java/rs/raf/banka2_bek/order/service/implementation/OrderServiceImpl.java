@@ -37,6 +37,9 @@ import rs.raf.banka2_bek.order.service.OrderService;
 import rs.raf.banka2_bek.order.service.OrderStatusService;
 import rs.raf.banka2_bek.order.service.OrderValidationService;
 import rs.raf.banka2_bek.berza.service.ExchangeManagementService;
+import rs.raf.banka2_bek.investmentfund.model.InvestmentFund;
+import rs.raf.banka2_bek.investmentfund.repository.InvestmentFundRepository;
+import org.springframework.security.access.AccessDeniedException;
 import rs.raf.banka2_bek.portfolio.model.Portfolio;
 import rs.raf.banka2_bek.portfolio.repository.PortfolioRepository;
 import rs.raf.banka2_bek.stock.model.Listing;
@@ -66,6 +69,7 @@ public class OrderServiceImpl implements OrderService {
     private final BankTradingAccountResolver bankTradingAccountResolver;
     private final CurrencyConversionService currencyConversionService;
     private final PortfolioRepository portfolioRepository;
+    private final InvestmentFundRepository investmentFundRepository;
 
     @Override
     @Transactional
@@ -89,9 +93,33 @@ public class OrderServiceImpl implements OrderService {
         UserContext userContext = resolveCurrentUser();
         boolean isEmployee = UserRole.isEmployee(userContext.userRole());
 
-        // Step 5: Resolve account (bankin za zaposlene, licni za klijente).
+        // Step 5: Resolve account.
+        //   Klijent: licni racun
+        //   Supervizor sa fundId: fond.account (RSD) — P3 / Celina 4 (Nova) §3883-3964
+        //   Supervizor/agent bez fundId: bankin trading racun (postojeci flow)
         String listingCurrencyCode = resolveListingCurrency(listing);
-        Account account = resolveTradingAccount(dto.getAccountId(), isEmployee, listingCurrencyCode);
+        final InvestmentFund fund;
+        Account account;
+        if (dto.getFundId() != null) {
+            if (!isEmployee) {
+                throw new AccessDeniedException(
+                        "Samo supervizori mogu da kupuju u ime investicionog fonda.");
+            }
+            fund = investmentFundRepository.findById(dto.getFundId())
+                    .orElseThrow(() -> new EntityNotFoundException(
+                            "Investicioni fond ne postoji: " + dto.getFundId()));
+            // P5 — proverava se da je supervizor manager fonda; ako nije, 403.
+            if (!userContext.userId().equals(fund.getManagerEmployeeId())) {
+                throw new AccessDeniedException(
+                        "Niste manager fonda " + fund.getName() + " — ne mozete kupovati u njegovo ime.");
+            }
+            account = accountRepository.findForUpdateById(fund.getAccountId())
+                    .orElseThrow(() -> new EntityNotFoundException(
+                            "Racun fonda ne postoji: " + fund.getAccountId()));
+        } else {
+            fund = null;
+            account = resolveTradingAccount(dto.getAccountId(), isEmployee, listingCurrencyCode);
+        }
         Portfolio portfolio = null;
         if (direction == OrderDirection.SELL) {
             portfolio = portfolioRepository
@@ -169,6 +197,9 @@ public class OrderServiceImpl implements OrderService {
         order.setStatus(status);
         order.setApprovedBy(approvedBy);
         order.setAfterHours(afterHours);
+        if (fund != null) {
+            order.setFundId(fund.getId());
+        }
 
         if (direction == OrderDirection.BUY) {
             order.setReservedAccountId(account.getId());

@@ -89,4 +89,21 @@ public class InvestmentFund {
     //   — spec primer prikazuje samo "Datum kreiranja". Nije obavezno.
     @Column(name = "inception_date")
     private LocalDate inceptionDate;
+
+    /**
+     * P9 — Spec Celina 4 (Nova) §4222 Napomena 2: "Klijent je klijent koji je
+     * vlasnik banke." Banka kao entitet investira kroz pozicije
+     * ClientFundPosition sa userRole='CLIENT' i userId = ownerClientId banke.
+     *
+     * Ovo polje je NEnametljivo — moze biti null za fondove kreirane pre nego
+     * sto je vlasnik banke uveden u seed. InvestmentFundService.listBankPositions
+     * filtrira pozicije po (userRole='CLIENT', userId=ownerClientId).
+     *
+     * TODO (BE tim): u seed.sql dodati klijenta "Banka 2 d.o.o." (ili sl.) i
+     * setovati ovo polje pri kreiranju fonda na njegov client_id. Alternativa
+     * je centralni `bank.owner-client-id` u application.properties + lookup
+     * pri svakom listBankPositions pozivu.
+     */
+    @Column(name = "owner_client_id")
+    private Long ownerClientId;
 }

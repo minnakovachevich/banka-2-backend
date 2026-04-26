@@ -5,56 +5,58 @@ import org.springframework.stereotype.Component;
 
 /*
 ================================================================================
- TODO — RETRY PETLJA ZA ZAGLAVLJENE INTER-BANK TRANSAKCIJE
+ TODO — RETRY PETLJA ZA NEPOTVRDJENE PORUKE (PROTOKOL §2.9)
  Zaduzen: BE tim
- Spec referenca: Celina 4, linije 422-424 "mehanizme za resavanje grešaka i
-                                           ponavljanje transakcija"; 515-519
+ Spec ref: protokol §2.9 Message exchange — "Svaka poruka mora biti retry-ovana
+           dok se ne prizna" (at-most-once preko idempotence kljuceva)
 --------------------------------------------------------------------------------
  FLOW:
-  Svaka 2 minuta proveravamo sve transakcije ciji je status "in-progress"
-  (PREPARING, COMMITTING, ABORTING) i cija je lastRetryAt starija od
-  configurabilnog praga (npr. 30s). Za njih re-saljemo poslednju poruku
-  (ili CHECK_STATUS ako ne znamo gde smo stali) i azuriramo lastRetryAt.
+  Svaka 2 minuta proveravamo InterbankMessage gde je status=PENDING i
+  poslednji pokusaj stariji od interval praga. Za svaku poruku:
+   1. Ako retryCount >= maxRetries:
+      - status=STUCK, log ERROR (supervizor treba intervenciju)
+      - Lokalna transakcija ostaje u PREPARED (rezervisana sredstva); manualna
+        akcija ili supervisor MARK STUCK -> ROLLBACK lokalno
+   2. Inace:
+      - InterbankClient.sendMessage(routingNumber, type, envelope, responseType)
+      - 200/204 -> markOutboundSent (status=SENT)
+      - 202     -> ostani PENDING (legitimno cekanje)
+      - 4xx/5xx/network -> markOutboundFailed (retryCount++)
+      - 401     -> auth issue, skip retry, log ERROR
 
- KONFIGURACIJA (application.properties):
+ IDEMPOTENCY (§2.2):
+  Idempotence key se ZADRZAVA pri retry-u. Druga banka pri ponovnom
+  prijemu vraca isti odgovor (cache hit u InterbankMessageService).
+
+ KONFIGURACIJA:
    interbank.retry.interval-seconds=30
    interbank.retry.max-retries=10
    interbank.retry.stuck-timeout-minutes=30
 
- GLAVNI STEP:
-  1. Ucitaj sve in-progress tx gde lastRetryAt < now - interval
-  2. Za svaku:
-     a. Ako retryCount >= maxRetries:
-         - Postavi status=STUCK, failureReason="Max retries exceeded"
-         - Oslobodi lokalne rezervacije (safety)
-         - Log ERROR (supervizor treba intervenciju)
-     b. Inace:
-         - posalji CHECK_STATUS poruku partnerskoj banci (ili re-send last)
-         - azuriraj retryCount++ i lastRetryAt=now
-  3. Obradjuj odgovor asinhrono — idempotentno kroz InterbankMessageService.
-
- IDEMPOTENCY:
-  Poruke su identifikovane sa messageId. Druga banka kada dobije istu
-  poruku drugi put (ili CHECK_STATUS) vraca isti rezultat.
-
  TESTOVI:
-  - Retry triggers after configured interval
-  - Max retries → STUCK
-  - Successful retry → clean up retryCount
+  - Retry se ne dešava pre interval praga
+  - Max retries -> STUCK + log
+  - 202 ne uvecava retryCount, ostaje PENDING
+  - Uspesan retry oslobadja iz pending-a
+  - Idempotency: ponovljeni response je cache-iran kod druge banke
 ================================================================================
 */
 @Component
 public class InterbankRetryScheduler {
 
-    // TODO: injectovati InterbankTransactionRepository, InterbankClient, InterbankMessageService
+    // TODO: injectovati InterbankMessageRepository, InterbankClient, InterbankMessageService
 
     /**
-     * TODO: implementiraj petlju kroz in-progress transakcije.
-     * Cron svaka 2 minute je dovoljno — ako hoces brzi reagovanje,
-     * snizi na 30s.
+     * Cron svaka 2 minuta. Snizi na 30s ako hoces brzi reagovanje
+     * (i azuriraj interbank.retry.interval-seconds u skladu).
      */
     @Scheduled(fixedRate = 120_000)
-    public void retryStaleTransactions() {
-        // TODO: implementirati
+    public void retryStaleMessages() {
+        // TODO:
+        //  1. messageRepo.findPendingForRetry(now - intervalSeconds)
+        //  2. za svaku:
+        //     - if retryCount >= maxRetries: markOutboundFailed → STUCK
+        //     - else: client.sendMessage(...) + recordovati ishod
+        //  3. Atomicno per-poruka (osim send-a) — ne blokiraj druge poruke
     }
 }
