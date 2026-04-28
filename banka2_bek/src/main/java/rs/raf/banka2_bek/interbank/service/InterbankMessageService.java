@@ -2,7 +2,10 @@ package rs.raf.banka2_bek.interbank.service;
 
 import org.springframework.stereotype.Service;
 import rs.raf.banka2_bek.interbank.model.InterbankMessage;
+import rs.raf.banka2_bek.interbank.model.InterbankMessageDirection;
+import rs.raf.banka2_bek.interbank.model.InterbankMessageStatus;
 import rs.raf.banka2_bek.interbank.protocol.IdempotenceKey;
+import rs.raf.banka2_bek.interbank.protocol.MessageType;
 import rs.raf.banka2_bek.interbank.repository.InterbankMessageRepository;
 
 import java.util.Optional;
@@ -73,10 +76,13 @@ import java.util.Optional;
 public class InterbankMessageService {
 
     private final InterbankMessageRepository repository;
+    private final BankRoutingService bankRoutingService;
 
-    public InterbankMessageService(InterbankMessageRepository repository) {
+    public InterbankMessageService(InterbankMessageRepository repository, BankRoutingService bankRoutingService) {
         this.repository = repository;
+        this.bankRoutingService = bankRoutingService;
     }
+
 
     public Optional<String> findCachedResponse(IdempotenceKey key) {
         // TODO: §2.2 lookup po (key.routingNumber, key.locallyGeneratedKey)
@@ -87,7 +93,25 @@ public class InterbankMessageService {
                                        MessageType messageType,
                                        String requestBody,
                                        Integer httpStatus,
-                                       String responseBody) {
+                                       String responseBody, ) {
+
+        InterbankMessage.builder()
+                .senderRoutingNumber(bankRoutingService.myRoutingNumber())
+                .locallyGeneratedKey(key.locallyGeneratedKey())
+                .messageType(messageType)
+                .direction(InterbankMessageDirection.INBOUND)
+                .status(InterbankMessageStatus.INBOUND)
+                .peerRoutingNumber(key.routingNumber())
+                .transactionId().
+                requestBody().responseBody()
+                .httpStatus(httpStatus)
+                .retryCount()
+                .lastError().
+                lastAttemptAt()
+                .createdAt()
+                .build()
+
+
         // TODO: §2.2 upis (key + request + response + status) atomicno
         throw new UnsupportedOperationException("TODO: implementirati recordInboundResponse");
     }
@@ -115,13 +139,4 @@ public class InterbankMessageService {
         throw new UnsupportedOperationException("TODO: implementirati markOutboundFailed");
     }
 
-    /**
-     * Lokalni alias za MessageType iz protocol/ paketa, da bi parametri
-     * ovog servisa bili spec-aligned.
-     */
-    public enum MessageType {
-        NEW_TX,
-        COMMIT_TX,
-        ROLLBACK_TX
-    }
 }

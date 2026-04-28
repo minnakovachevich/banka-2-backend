@@ -1,11 +1,20 @@
 package rs.raf.banka2_bek.interbank.service;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
-import rs.raf.banka2_bek.interbank.protocol.CommitTransaction;
-import rs.raf.banka2_bek.interbank.protocol.RollbackTransaction;
-import rs.raf.banka2_bek.interbank.protocol.Transaction;
-import rs.raf.banka2_bek.interbank.protocol.TransactionVote;
+import rs.raf.banka2_bek.interbank.exception.InterbankExceptions;
+import rs.raf.banka2_bek.interbank.model.InterbankTransaction;
+import rs.raf.banka2_bek.interbank.model.InterbankTransactionStatus;
+import rs.raf.banka2_bek.interbank.protocol.*;
+import rs.raf.banka2_bek.interbank.repository.InterbankTransactionRepository;
+
+import java.time.LocalDateTime;
+import java.util.*;
 
 /*
 ================================================================================
@@ -118,16 +127,120 @@ DEPENDENCY INJECTION (planirano):
 ================================================================================
 */
 @Service
+@RequiredArgsConstructor
 public class TransactionExecutorService {
+
+    private final InterbankMessageService messageService;
+    private final InterbankClient client;
+    private final BankRoutingService routing;
+    private final InterbankTransactionRepository txRepo;
+    private final ObjectMapper objectMapper;
+
+    /**
+     * §2.8.5: self-proxy so that @Transactional on prepareLocal/commitLocal/rollbackLocal
+     * is respected when called from execute() (Spring AOP does not intercept self-invocation
+     * through `this`; going through the proxy here ensures each sub-method gets its own
+     * local transaction as annotated).
+     */
+    @Lazy
+    @Autowired
+    private TransactionExecutorService self;
 
     @Transactional
     public Transaction formTransaction(/* TODO: argumenti */) {
         throw new UnsupportedOperationException("TODO: §2.8.3 Transaction formation");
     }
 
-    @Transactional
+    /**
+     * §2.8.5 Coordinator — orchestrates the two-phase commit across all involved banks.
+     * Not @Transactional itself: each phase (prepare, commit/rollback) runs in its own
+     * local transaction so DB locks are released before network I/O begins.
+     *
+     * TODO: prepareLocal + recordOutbound(NEW_TX) must commit in the SAME local transaction
+     *   per §2.8.5 ("record these messages in the message log in the same local transaction
+     *   as its local preparation"). Extract to a @Transactional prepareTxPhase(tx, remoteRns)
+     *   called via self once prepareLocal is implemented.
+     * TODO: similarly, commitLocal/rollbackLocal + recordOutbound(COMMIT/ROLLBACK_TX) must
+     *   be in one local transaction per §2.8.5 / §2.8.8.
+     */
     public void execute(Transaction tx) {
-        throw new UnsupportedOperationException("TODO: §2.8.5 Remote transaction execution");
+        Set<Integer> remoteRns = collectRemoteRoutingNumbers(tx);
+
+        if (remoteRns.isEmpty()) {
+            // §2.8.4 last paragraph: fully local — two sequential local transactions
+            TransactionVote vote = self.prepareLocal(tx);
+            if (vote.vote() == TransactionVote.Vote.YES) {
+                self.commitLocal(tx.transactionId());
+            } else {
+                self.rollbackLocal(tx.transactionId());
+            }
+            return;
+        }
+
+        // §2.8.5: promote to coordinator
+        TransactionVote myVote = self.prepareLocal(tx);
+        if (myVote.vote() == TransactionVote.Vote.NO) {
+            // prepareLocal already rolled back local reservations; no messages sent
+            return;
+        }
+
+        // Log PENDING NEW_TX messages for each remote bank
+        record Phase1Entry(IdempotenceKey key, Message<Transaction> envelope) {}
+        Map<Integer, Phase1Entry> phase1 = new LinkedHashMap<>();
+
+        for (int remoteRn : remoteRns) {
+            IdempotenceKey key = messageService.generateKey();
+            Message<Transaction> envelope = new Message<>(key, MessageType.NEW_TX, tx);
+            try {
+                messageService.recordOutbound(key, remoteRn,
+                        InterbankMessageService.MessageType.NEW_TX,
+                        objectMapper.writeValueAsString(envelope));
+            } catch (JsonProcessingException e) {
+                throw new InterbankExceptions.InterbankProtocolException(
+                        "Failed to serialize NEW_TX for routing " + remoteRn + ": " + e.getMessage());
+            }
+            phase1.put(remoteRn, new Phase1Entry(key, envelope));
+        }
+
+        saveCoordinatorState(tx, InterbankTransactionStatus.PREPARING);
+
+        // Send NEW_TX to each remote bank and collect votes
+        Map<Integer, TransactionVote> votes = new LinkedHashMap<>();
+        for (var entry : phase1.entrySet()) {
+            int remoteRn = entry.getKey();
+            IdempotenceKey key = entry.getValue().key();
+            Message<Transaction> envelope = entry.getValue().envelope();
+
+            TransactionVote vote;
+            try {
+                vote = client.sendMessage(remoteRn, MessageType.NEW_TX, envelope, TransactionVote.class);
+                if (vote == null) {
+                    // 202 Accepted: remote still processing; scheduler will retry and deliver vote
+                    messageService.markOutboundSent(key, 202, null);
+                    vote = new TransactionVote(TransactionVote.Vote.NO, List.of());
+                } else {
+                    try {
+                        messageService.markOutboundSent(key, 200, objectMapper.writeValueAsString(vote));
+                    } catch (JsonProcessingException ignored) {
+                        messageService.markOutboundSent(key, 200, null);
+                    }
+                }
+            } catch (InterbankExceptions.InterbankCommunicationException e) {
+                messageService.markOutboundFailed(key, e.getMessage());
+                vote = new TransactionVote(TransactionVote.Vote.NO, List.of());
+            }
+            votes.put(remoteRn, vote);
+        }
+
+        boolean allYes = votes.values().stream().allMatch(v -> v.vote() == TransactionVote.Vote.YES);
+
+        if (allYes) {
+            self.commitLocal(tx.transactionId());
+            sendPhase2Messages(remoteRns, MessageType.COMMIT_TX, new CommitTransaction(tx.transactionId()));
+        } else {
+            self.rollbackLocal(tx.transactionId());
+            sendPhase2Messages(remoteRns, MessageType.ROLLBACK_TX, new RollbackTransaction(tx.transactionId()));
+        }
     }
 
     @Transactional
@@ -136,27 +249,97 @@ public class TransactionExecutorService {
     }
 
     @Transactional
-    public void commitLocal(rs.raf.banka2_bek.interbank.protocol.ForeignBankId transactionId) {
+    public void commitLocal(ForeignBankId transactionId) {
         throw new UnsupportedOperationException("TODO: §2.8.4 commit local");
     }
 
     @Transactional
-    public void rollbackLocal(rs.raf.banka2_bek.interbank.protocol.ForeignBankId transactionId) {
+    public void rollbackLocal(ForeignBankId transactionId) {
         throw new UnsupportedOperationException("TODO: §2.8.7 rollback local");
     }
 
     @Transactional
-    public TransactionVote handleNewTx(Transaction tx, rs.raf.banka2_bek.interbank.protocol.IdempotenceKey key) {
+    public TransactionVote handleNewTx(Transaction tx, IdempotenceKey key) {
         throw new UnsupportedOperationException("TODO: §2.12.1 NEW_TX handler (inbound)");
     }
 
     @Transactional
-    public void handleCommitTx(CommitTransaction body, rs.raf.banka2_bek.interbank.protocol.IdempotenceKey key) {
+    public void handleCommitTx(CommitTransaction body, IdempotenceKey key) {
         throw new UnsupportedOperationException("TODO: §2.12.2 COMMIT_TX handler");
     }
 
     @Transactional
-    public void handleRollbackTx(RollbackTransaction body, rs.raf.banka2_bek.interbank.protocol.IdempotenceKey key) {
+    public void handleRollbackTx(RollbackTransaction body, IdempotenceKey key) {
         throw new UnsupportedOperationException("TODO: §2.12.3 ROLLBACK_TX handler");
+    }
+
+    // -------------------------------------------------------------------------
+    // Private helpers
+    // -------------------------------------------------------------------------
+
+    /** Collects routing numbers from tx postings that belong to banks other than ours. */
+    private Set<Integer> collectRemoteRoutingNumbers(Transaction tx) {
+        int myRn = routing.myRoutingNumber();
+        Set<Integer> result = new LinkedHashSet<>();
+        for (Posting posting : tx.postings()) {
+            int rn;
+            if (posting.account() instanceof TxAccount.Person p) {
+                rn = p.id().routingNumber();
+            } else if (posting.account() instanceof TxAccount.Account a) {
+                rn = routing.parseRoutingNumber(a.num());
+            } else if (posting.account() instanceof TxAccount.Option o) {
+                rn = o.id().routingNumber();
+            } else {
+                continue;
+            }
+            if (rn != myRn) {
+                result.add(rn);
+            }
+        }
+        return result;
+    }
+
+    /** Logs and immediately fires phase-2 messages (COMMIT_TX or ROLLBACK_TX) to all remote banks.
+     *  Delivery failures stay PENDING for the retry scheduler. */
+    private <T> void sendPhase2Messages(Set<Integer> remoteRns, MessageType type, T body) {
+        InterbankMessageService.MessageType localType =
+                InterbankMessageService.MessageType.valueOf(type.name());
+        for (int remoteRn : remoteRns) {
+            IdempotenceKey key = messageService.generateKey();
+            Message<T> envelope = new Message<>(key, type, body);
+            try {
+                messageService.recordOutbound(key, remoteRn, localType,
+                        objectMapper.writeValueAsString(envelope));
+            } catch (JsonProcessingException e) {
+                throw new InterbankExceptions.InterbankProtocolException(
+                        "Failed to serialize " + type + " for routing " + remoteRn + ": " + e.getMessage());
+            }
+            try {
+                client.sendMessage(remoteRn, type, envelope, Void.class);
+                messageService.markOutboundSent(key, 204, null);
+            } catch (InterbankExceptions.InterbankCommunicationException e) {
+                messageService.markOutboundFailed(key, e.getMessage());
+                // Entry stays PENDING; scheduler retries from message log
+            }
+        }
+    }
+
+    private void saveCoordinatorState(Transaction tx, InterbankTransactionStatus status) {
+        try {
+            InterbankTransaction ibt = new InterbankTransaction();
+            ibt.setTransactionRoutingNumber(tx.transactionId().routingNumber());
+            ibt.setTransactionIdString(tx.transactionId().id());
+            ibt.setRole(InterbankTransaction.InterbankTransactionRole.INITIATOR);
+            ibt.setStatus(status);
+            ibt.setTransactionBody(objectMapper.writeValueAsString(tx));
+            ibt.setRetryCount(0);
+            LocalDateTime now = LocalDateTime.now();
+            ibt.setCreatedAt(now);
+            ibt.setLastActivityAt(now);
+            txRepo.save(ibt);
+        } catch (JsonProcessingException e) {
+            throw new InterbankExceptions.InterbankProtocolException(
+                    "Failed to serialize transaction body: " + e.getMessage());
+        }
     }
 }
