@@ -1,5 +1,6 @@
 package rs.raf.banka2_bek.interbank.service;
 
+import org.springframework.boot.jackson.autoconfigure.JacksonProperties;
 import org.springframework.stereotype.Service;
 import rs.raf.banka2_bek.interbank.model.InterbankMessage;
 import rs.raf.banka2_bek.interbank.model.InterbankMessageDirection;
@@ -8,7 +9,10 @@ import rs.raf.banka2_bek.interbank.protocol.IdempotenceKey;
 import rs.raf.banka2_bek.interbank.protocol.MessageType;
 import rs.raf.banka2_bek.interbank.repository.InterbankMessageRepository;
 
+import java.security.SecureRandom;
+import java.util.Base64;
 import java.util.Optional;
+import java.util.UUID;
 
 /*
 ================================================================================
@@ -83,10 +87,14 @@ public class InterbankMessageService {
         this.bankRoutingService = bankRoutingService;
     }
 
-
     public Optional<String> findCachedResponse(IdempotenceKey key) {
         // TODO: §2.2 lookup po (key.routingNumber, key.locallyGeneratedKey)
-        throw new UnsupportedOperationException("TODO: implementirati findCachedResponse");
+
+        Optional<InterbankMessage> messageOpt = repository.findBySenderRoutingNumberAndLocallyGeneratedKey(
+                key.routingNumber(),
+                key.locallyGeneratedKey()
+        );
+        return messageOpt.map(interbankMessage -> interbankMessage.getDirection().toString());
     }
 
     public void recordInboundResponse(IdempotenceKey key,
@@ -117,8 +125,12 @@ public class InterbankMessageService {
     }
 
     public IdempotenceKey generateKey() {
-        // TODO: vrati IdempotenceKey(myRoutingNumber, UUID.randomUUID().toString())
-        throw new UnsupportedOperationException("TODO: implementirati generateKey");
+
+        byte[] bytes = new byte[32];
+        new SecureRandom().nextBytes(bytes);
+        StringBuilder sb = new StringBuilder(64);
+        for(byte b : bytes) sb.append(String.format("%02x", b));
+        return new IdempotenceKey(bankRoutingService.myRoutingNumber(), sb.toString());
     }
 
     public InterbankMessage recordOutbound(IdempotenceKey key,
@@ -139,4 +151,13 @@ public class InterbankMessageService {
         throw new UnsupportedOperationException("TODO: implementirati markOutboundFailed");
     }
 
+    /**
+     * Lokalni alias za MessageType iz protocol/ paketa, da bi parametri
+     * ovog servisa bili spec-aligned.
+     */
+    public enum MessageType {
+        NEW_TX,
+        COMMIT_TX,
+        ROLLBACK_TX
+    }
 }

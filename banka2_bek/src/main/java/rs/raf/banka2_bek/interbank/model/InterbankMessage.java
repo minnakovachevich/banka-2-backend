@@ -55,6 +55,7 @@ import java.time.LocalDateTime;
         @Index(name = "idx_ibm_status_attempt", columnList = "status, last_attempt_at")
 })
 @Data
+@Builder
 @NoArgsConstructor
 @AllArgsConstructor
 @Builder
