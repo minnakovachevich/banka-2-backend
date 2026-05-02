@@ -38,7 +38,7 @@ import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
-class InvestmentFundServiceTest {
+class InvestmentFundServiceCoreTest {
 
     @Mock private InvestmentFundRepository investmentFundRepository;
     @Mock private AccountRepository accountRepository;
@@ -55,8 +55,6 @@ class InvestmentFundServiceTest {
 
     @InjectMocks
     private InvestmentFundService service;
-
-    // ─── Helperi ────────────────────────────────────────────────────────────────
 
     private Employee buildSupervisor(Long id) {
         Employee e = new Employee();
@@ -117,8 +115,6 @@ class InvestmentFundServiceTest {
         f.setActive(true);
         return f;
     }
-
-    // ─── createFund ─────────────────────────────────────────────────────────────
 
     @Test
     @DisplayName("createFund - happy path vraca detaljan DTO")
@@ -197,8 +193,6 @@ class InvestmentFundServiceTest {
         assertThrows(IllegalStateException.class, () -> service.createFund(dto, empId));
     }
 
-    // ─── listDiscovery ──────────────────────────────────────────────────────────
-
     @Test
     @DisplayName("listDiscovery - vraca sve aktivne fondove")
     void listDiscovery_returnsAllActive() {
@@ -266,8 +260,6 @@ class InvestmentFundServiceTest {
         assertEquals("B Fund", result.get(0).getName());
         assertEquals("A Fund", result.get(1).getName());
     }
-
-    // ─── getFundDetails ─────────────────────────────────────────────────────────
 
     @Test
     @DisplayName("getFundDetails - vraca kompletan detaljan DTO")
