@@ -22,6 +22,7 @@ import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.*;
 import static org.springframework.test.web.client.response.MockRestResponseCreators.*;
@@ -65,7 +66,7 @@ class InterbankClientTest {
         partner.setOutboundToken(OUT_TOKEN);
         partner.setInboundToken("inToken1");
 
-        when(bankRoutingService.resolvePartnerByRouting(REMOTE_RN)).thenReturn(Optional.of(partner));
+        lenient().when(bankRoutingService.resolvePartnerByRouting(REMOTE_RN)).thenReturn(Optional.of(partner));
     }
 
     // -------------------------------------------------------------------------

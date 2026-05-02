@@ -63,7 +63,7 @@ class InterbankInboundControllerTest {
         partner.setInboundToken(VALID_INBOUND_TOKEN);
         partner.setOutboundToken("outToken1");
         partner.setBaseUrl("http://bank1:8080");
-        when(properties.getPartners()).thenReturn(List.of(partner));
+        lenient().when(properties.getPartners()).thenReturn(List.of(partner));
     }
 
     // -------------------------------------------------------------------------

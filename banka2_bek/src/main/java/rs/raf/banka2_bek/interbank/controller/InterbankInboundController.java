@@ -82,7 +82,7 @@ public class InterbankInboundController {
     @PostMapping
     public ResponseEntity<Object> receiveMessage(
             @RequestHeader(value = "X-Api-Key", required = false) String apiKey,
-            @RequestBody JsonNode envelope) {
+            @RequestBody String rawBody) throws Exception {
 
         if (apiKey == null || apiKey.isBlank()) return ResponseEntity.status(401).build();
 
@@ -95,6 +95,7 @@ public class InterbankInboundController {
 
         InterbankProperties.PartnerBank partnerBank = partnerBankOpt.get();
 
+        JsonNode envelope = objectMapper.readTree(rawBody);
         IdempotenceKey idempotenceKey = objectMapper.convertValue(envelope.get("idempotenceKey"), IdempotenceKey.class);
         MessageType messageType = objectMapper.convertValue(envelope.get("messageType"), MessageType.class);
         JsonNode messageNode = envelope.get("message");

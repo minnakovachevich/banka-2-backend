@@ -83,7 +83,7 @@ class TransactionExecutorServiceTest {
 
         ReflectionTestUtils.setField(service, "self", self);
 
-        when(routing.myRoutingNumber()).thenReturn(MY_RN);
+        lenient().when(routing.myRoutingNumber()).thenReturn(MY_RN);
 
         // Parse routing number from account number prefix (first 3 digits)
         lenient().when(routing.parseRoutingNumber(any())).thenAnswer(inv -> {
@@ -437,10 +437,6 @@ class TransactionExecutorServiceTest {
                 new Posting(new TxAccount.Account(ACCT_B),
                         BigDecimal.valueOf(-10), new Asset.Stock(new StockDescription("AAPL")))
         ), new ForeignBankId(MY_RN, "tx-stock-acct"), null, null, null, null);
-        // Account existence check will return active accounts, but pairing is wrong
-        when(accountRepository.findByAccountNumber(any()))
-                .thenReturn(Optional.of(buildAccount(ACCT_A, "RSD", BigDecimal.ZERO, AccountStatus.ACTIVE)));
-
         TransactionVote vote = service.prepareLocal(tx);
 
         assertThat(vote.vote()).isEqualTo(TransactionVote.Vote.NO);
@@ -587,7 +583,7 @@ class TransactionExecutorServiceTest {
 
         service.commitLocal(tx.transactionId());
 
-        verify(currencyConversionService).convert(eq(BigDecimal.valueOf(100)), eq("EUR"), eq("RSD"));
+        verify(currencyConversionService, times(2)).convert(eq(BigDecimal.valueOf(100)), eq("EUR"), eq("RSD"));
         verify(reservationApplier).commitMonas(eq(ACCT_B), eq(BigDecimal.valueOf(11700)), eq(false));
     }
 
